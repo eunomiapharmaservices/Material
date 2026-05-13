@@ -102,21 +102,109 @@ function Spinner() {
 }
 
 // ══════════════════════════════════════════════════════════════
-// DOCUMENT VIEWER
-// Fetches through proxy → converts to blob URL → renders inline.
-// Blob URLs are always same-origin so the browser renders them
-// instead of triggering a download, regardless of server headers.
+// PDF CANVAS RENDERER — uses PDF.js, works in all browsers
+// regardless of CSP, sandbox, or Content-Disposition headers
+// ══════════════════════════════════════════════════════════════
+function PdfCanvasViewer({ arrayBuf, blobUrl, fileName }) {
+  var containerRef = useRef(null);
+  var [pdfLoading, setPdfLoading] = useState(true);
+  var [pageCount, setPageCount] = useState(0);
+
+  var PDFJS_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+  var WORKER_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+  useEffect(function() {
+    if (!arrayBuf || !containerRef.current) return;
+
+    function loadScript(src) {
+      return new Promise(function(res, rej) {
+        if (document.querySelector('script[src="' + src + '"]')) { res(); return; }
+        var s = document.createElement('script');
+        s.src = src; s.onload = res; s.onerror = rej;
+        document.head.appendChild(s);
+      });
+    }
+
+    var container = containerRef.current;
+    container.innerHTML = '';
+    setPdfLoading(true);
+
+    loadScript(PDFJS_CDN)
+      .then(function() {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = WORKER_CDN;
+        // Use a copy to avoid detached ArrayBuffer issues
+        return window.pdfjsLib.getDocument({ data: arrayBuf.slice(0) }).promise;
+      })
+      .then(function(pdf) {
+        setPageCount(pdf.numPages);
+
+        // Render all pages sequentially
+        var chain = Promise.resolve();
+        for (var i = 1; i <= pdf.numPages; i++) {
+          (function(pageNum) {
+            chain = chain.then(function() {
+              return pdf.getPage(pageNum).then(function(page) {
+                var scale = 1.8;
+                var viewport = page.getViewport({ scale: scale });
+
+                var wrapper = document.createElement('div');
+                wrapper.style.cssText = 'margin:0 auto 12px;max-width:900px;box-shadow:0 2px 12px rgba(0,0,0,0.25);background:#fff;';
+
+                var canvas = document.createElement('canvas');
+                canvas.width  = viewport.width;
+                canvas.height = viewport.height;
+                canvas.style.cssText = 'display:block;width:100%;height:auto;';
+
+                wrapper.appendChild(canvas);
+                container.appendChild(wrapper);
+
+                return page.render({
+                  canvasContext: canvas.getContext('2d'),
+                  viewport: viewport
+                }).promise;
+              });
+            });
+          })(i);
+        }
+        return chain;
+      })
+      .then(function() { setPdfLoading(false); })
+      .catch(function(e) {
+        console.error('PDF.js error:', e);
+        container.innerHTML = '<p style="color:#dc2626;padding:20px;text-align:center;">PDF render failed: ' + e.message + '</p>';
+        setPdfLoading(false);
+      });
+  }, [arrayBuf]);
+
+  return (
+    <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+      <div style={{background:'#f8fafc',borderBottom:'1px solid #e2e8f0',padding:'6px 14px',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
+        <span style={{fontSize:11,color:'#94a3b8',fontWeight:600}}>📄 {fileName} {pageCount > 0 && '(' + pageCount + ' pages)'}</span>
+        {blobUrl && <a href={blobUrl} target="_blank" rel="noreferrer" style={{fontSize:11,color:'#1e3a5f',fontWeight:700,textDecoration:'none'}}>Open in new tab ↗</a>}
+      </div>
+      {pdfLoading && (
+        <div style={{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%)',textAlign:'center',color:'#64748b',zIndex:2}}>
+          <div style={{width:32,height:32,border:'3px solid #e2e8f0',borderTopColor:'#1e3a5f',borderRadius:'50%',animation:'spin 0.7s linear infinite',margin:'0 auto 12px'}}/>
+          <p style={{fontSize:13,fontWeight:600}}>Rendering PDF…</p>
+        </div>
+      )}
+      <div ref={containerRef} style={{flex:1,overflowY:'auto',background:'#525659',padding:'16px 24px',position:'relative'}}/>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════
+// DOCUMENT VIEWER — fetches file, processes, renders inline
 // ══════════════════════════════════════════════════════════════
 function DocumentViewer({ fileUrl, filePath, fileName, type, onTextSelect }) {
-  const [blobUrl,  setBlobUrl]  = useState(null);
-  const [docHtml,  setDocHtml]  = useState(null);
-  const [sheets,   setSheets]   = useState([]);
-  const [activeTab,setActiveTab]= useState(0);
-  const [loading,  setLoading]  = useState(false);
-  const [viewErr,  setViewErr]  = useState(null);
+  var [arrayBuf,  setArrayBuf]  = useState(null);
+  var [blobUrl,   setBlobUrl]   = useState(null);
+  var [docHtml,   setDocHtml]   = useState(null);
+  var [sheets,    setSheets]    = useState([]);
+  var [activeTab, setActiveTab] = useState(0);
+  var [loading,   setLoading]   = useState(false);
+  var [viewErr,   setViewErr]   = useState(null);
 
-  // Proxy route strips Supabase's Content-Disposition: attachment header.
-  // If filePath is not available fall back to the direct URL.
   var fetchUrl = filePath
     ? '/api/file-proxy?path=' + encodeURIComponent(filePath)
     : fileUrl;
@@ -125,54 +213,48 @@ function DocumentViewer({ fileUrl, filePath, fileName, type, onTextSelect }) {
     return new Promise(function(res, rej) {
       if (document.querySelector('script[src="' + src + '"]')) { res(); return; }
       var s = document.createElement('script');
-      s.src = src;
-      s.onload = res;
-      s.onerror = function() { rej(new Error('Script load failed: ' + src)); };
+      s.src = src; s.onload = res; s.onerror = function() { rej(new Error('Script load failed')); };
       document.head.appendChild(s);
     });
   }, []);
 
   useEffect(function() {
     if (!fetchUrl) return;
-    setDocHtml(null); setSheets([]); setViewErr(null); setLoading(true);
+    setArrayBuf(null); setDocHtml(null); setSheets([]); setViewErr(null); setLoading(true);
     setBlobUrl(function(old) { if (old) URL.revokeObjectURL(old); return null; });
 
     fetch(fetchUrl)
       .then(function(r) {
-        if (!r.ok) throw new Error('Could not load file (HTTP ' + r.status + '). Make sure the file was uploaded after the latest deployment.');
-        // Use arrayBuffer so we can explicitly type the Blob
+        if (!r.ok) throw new Error('HTTP ' + r.status + ' — try re-uploading the file');
         return r.arrayBuffer();
       })
       .then(function(buf) {
-        // Detect MIME type from extension for reliable inline rendering
-        var ext = (fileName || '').split('.').pop().toLowerCase();
-        var mimeMap = {
-          pdf: 'application/pdf',
-          docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-          doc: 'application/msword',
-          xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-          mp3: 'audio/mpeg', wav: 'audio/wav', mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm',
-        };
-        var mime = mimeMap[ext] || 'application/octet-stream';
-        var blob = new Blob([buf], { type: mime });
-        var url = URL.createObjectURL(blob);
-        setBlobUrl(url);
+        setArrayBuf(buf);
 
+        // Create blob URL for audio/video and download links
+        var ext = (fileName || '').split('.').pop().toLowerCase();
+        var mimeMap = { pdf:'application/pdf', mp3:'audio/mpeg', wav:'audio/wav', mp4:'video/mp4', mov:'video/quicktime', webm:'video/webm',
+          docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          xlsx:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
+        var blob = new Blob([buf], { type: mimeMap[ext] || 'application/octet-stream' });
+        setBlobUrl(URL.createObjectURL(blob));
+
+        // Word — parse with mammoth
         if (type && type.indexOf('Word') !== -1) {
           return loadScript('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js')
-            .then(function() { return window.mammoth.convertToHtml({ arrayBuffer: buf }); })
-            .then(function(result) { setDocHtml(result.value || '<p>Empty document.</p>'); setLoading(false); });
+            .then(function() { return window.mammoth.convertToHtml({ arrayBuffer: buf.slice(0) }); })
+            .then(function(r) { setDocHtml(r.value || '<p>Empty document.</p>'); });
         }
+        // Excel — parse with SheetJS
         if (type && type.indexOf('Excel') !== -1) {
           return loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js')
             .then(function() {
-              var wb = window.XLSX.read(buf, { type: 'array' });
-              setSheets(wb.SheetNames.map(function(n) { return { name: n, html: window.XLSX.utils.sheet_to_html(wb.Sheets[n]) }; }));
-              setLoading(false);
+              var wb = window.XLSX.read(buf.slice(0), { type:'array' });
+              setSheets(wb.SheetNames.map(function(n) { return { name:n, html:window.XLSX.utils.sheet_to_html(wb.Sheets[n]) }; }));
             });
         }
-        setLoading(false);
       })
+      .then(function() { setLoading(false); })
       .catch(function(e) { console.error('DocumentViewer:', e); setViewErr(e.message); setLoading(false); });
 
     return function() { setBlobUrl(function(old) { if (old) URL.revokeObjectURL(old); return null; }); };
@@ -185,7 +267,6 @@ function DocumentViewer({ fileUrl, filePath, fileName, type, onTextSelect }) {
     } catch(e) {}
   }
 
-  // ── Empty state ────────────────────────────────────────────────
   if (!fetchUrl) return (
     <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',background:'#f8fafc'}}>
       <div style={{textAlign:'center',color:'#94a3b8'}}>
@@ -195,51 +276,30 @@ function DocumentViewer({ fileUrl, filePath, fileName, type, onTextSelect }) {
     </div>
   );
 
-  // ── Loading ────────────────────────────────────────────────────
   if (loading) return (
     <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:14,background:'#f8fafc'}}>
       <div style={{width:36,height:36,border:'3px solid #e2e8f0',borderTopColor:'#1e3a5f',borderRadius:'50%',animation:'spin 0.7s linear infinite'}}/>
-      <p style={{fontSize:13,color:'#64748b',fontWeight:600}}>Loading document…</p>
+      <p style={{fontSize:13,color:'#64748b',fontWeight:600}}>Loading file…</p>
     </div>
   );
 
-  // ── Error ──────────────────────────────────────────────────────
   if (viewErr) return (
     <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',background:'#fef2f2',padding:32}}>
       <div style={{textAlign:'center',maxWidth:380}}>
         <div style={{fontSize:40,marginBottom:12}}>⚠️</div>
-        <p style={{fontWeight:700,color:'#991b1b',marginBottom:8}}>Could not load document</p>
+        <p style={{fontWeight:700,color:'#991b1b',marginBottom:8}}>Could not load file</p>
         <p style={{fontSize:12,color:'#dc2626',marginBottom:4}}>{viewErr}</p>
-        <p style={{fontSize:11,color:'#94a3b8',marginBottom:16}}>Try re-uploading the file — older files may not have been stored with a path.</p>
-        <a href={fileUrl || fetchUrl} target="_blank" rel="noreferrer"
-          style={{display:'inline-flex',alignItems:'center',gap:6,padding:'8px 16px',background:'#1e3a5f',color:'#fff',borderRadius:10,fontSize:13,fontWeight:700,textDecoration:'none'}}>
-          Try Opening Directly ↗
-        </a>
+        <p style={{fontSize:11,color:'#94a3b8',marginBottom:16}}>Delete this material and re-upload the file to fix this.</p>
       </div>
     </div>
   );
 
-  // ── PDF — <object> renders inline; iframe shows Chrome download UI ──
-  if (type === 'PDF Document') return (
-    <div style={{flex:1,overflow:'hidden',display:'flex',flexDirection:'column'}}>
-      <div style={{background:'#f8fafc',borderBottom:'1px solid #e2e8f0',padding:'6px 14px',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
-        <span style={{fontSize:11,color:'#94a3b8',fontWeight:600}}>📄 {fileName}</span>
-        {blobUrl && <a href={blobUrl} target="_blank" rel="noreferrer" style={{fontSize:11,color:'#1e3a5f',fontWeight:700,textDecoration:'none'}}>Open in new tab ↗</a>}
-      </div>
-      {blobUrl
-        ? <object data={blobUrl} type="application/pdf" style={{flex:1,width:'100%',border:'none',display:'block'}}>
-            <div style={{padding:40,textAlign:'center',color:'#64748b'}}>
-              <p style={{marginBottom:16,fontSize:13}}>Your browser cannot display this PDF inline.</p>
-              <a href={blobUrl} target="_blank" rel="noreferrer"
-                style={{padding:'9px 18px',background:'#1e3a5f',color:'#fff',borderRadius:10,fontSize:13,fontWeight:700,textDecoration:'none'}}>
-                Open PDF ↗
-              </a>
-            </div>
-          </object>
-        : <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center'}}><Spinner/></div>
-      }
-    </div>
-  );
+  // ── PDF — rendered via PDF.js canvas (bypasses all browser restrictions) ──
+  if (type === 'PDF Document') {
+    return arrayBuf
+      ? <PdfCanvasViewer arrayBuf={arrayBuf} blobUrl={blobUrl} fileName={fileName}/>
+      : <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center'}}><Spinner/></div>;
+  }
 
   // ── AUDIO ──────────────────────────────────────────────────────
   if (type === 'Audio File') return (
@@ -284,13 +344,9 @@ function DocumentViewer({ fileUrl, filePath, fileName, type, onTextSelect }) {
       {sheets.length > 1 && (
         <div style={{display:'flex',gap:4,padding:'8px 12px',background:'#f8fafc',borderBottom:'1px solid #e2e8f0',flexShrink:0,overflowX:'auto'}}>
           {sheets.map(function(s, i) {
-            return (
-              <button key={i} onClick={function(){ setActiveTab(i); }}
-                style={{padding:'4px 12px',borderRadius:6,border:'1px solid #e2e8f0',fontSize:11,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap',fontFamily:'inherit',
-                  background:activeTab===i?'#1e3a5f':'#fff',color:activeTab===i?'#fff':'#64748b'}}>
-                {s.name}
-              </button>
-            );
+            return <button key={i} onClick={function(){ setActiveTab(i); }}
+              style={{padding:'4px 12px',borderRadius:6,border:'1px solid #e2e8f0',fontSize:11,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap',fontFamily:'inherit',
+                background:activeTab===i?'#1e3a5f':'#fff',color:activeTab===i?'#fff':'#64748b'}}>{s.name}</button>;
           })}
         </div>
       )}
@@ -325,18 +381,14 @@ function DocumentViewer({ fileUrl, filePath, fileName, type, onTextSelect }) {
         <div style={{fontSize:56,marginBottom:14}}>{fileIcon(type)}</div>
         <p style={{fontWeight:700,color:'#1e293b',marginBottom:6}}>{fileName}</p>
         <p style={{fontSize:13,color:'#64748b',marginBottom:20}}>Download to review, then add comments in the right panel.</p>
-        {blobUrl && (
-          <a href={blobUrl} download={fileName}
-            style={{display:'inline-flex',alignItems:'center',gap:6,padding:'9px 18px',background:'#1e3a5f',color:'#fff',borderRadius:10,fontSize:13,fontWeight:700,textDecoration:'none'}}>
-            ⬇ Download to Review
-          </a>
-        )}
+        {blobUrl && <a href={blobUrl} download={fileName}
+          style={{display:'inline-flex',alignItems:'center',gap:6,padding:'9px 18px',background:'#1e3a5f',color:'#fff',borderRadius:10,fontSize:13,fontWeight:700,textDecoration:'none'}}>
+          ⬇ Download to Review
+        </a>}
       </div>
     </div>
   );
 }
-
-
 
 
 
