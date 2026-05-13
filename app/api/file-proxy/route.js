@@ -1,10 +1,13 @@
 // app/api/file-proxy/route.js
-// Fetches files from Supabase Storage server-side and streams them to the browser.
-// This eliminates CORS issues and keeps signed URLs from expiring in the client.
+// Fetches files from Supabase server-side and re-serves them with
+// Content-Disposition: inline so the browser displays rather than downloads.
+
+export const dynamic = 'force-dynamic';
+
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 
-const CONTENT_TYPES = {
+const MIME = {
   pdf:  'application/pdf',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   doc:  'application/msword',
@@ -19,41 +22,39 @@ const CONTENT_TYPES = {
   mp4:  'video/mp4',
   mov:  'video/quicktime',
   webm: 'video/webm',
-  avi:  'video/x-msvideo',
 };
 
 export async function GET(request) {
+  const { searchParams } = new URL(request.url);
+  const path = searchParams.get('path');
+
+  if (!path) {
+    return NextResponse.json({ error: 'Missing path' }, { status: 400 });
+  }
+
   try {
-    const { searchParams } = new URL(request.url);
-    const path = searchParams.get('path');
-
-    if (!path) {
-      return NextResponse.json({ error: 'Missing path parameter' }, { status: 400 });
-    }
-
-    // Download file server-side from Supabase (no CORS, uses service role key)
     const { data, error } = await supabase.storage
       .from('materials')
       .download(path);
 
     if (error || !data) {
-      console.error('file-proxy download error:', error);
-      return NextResponse.json({ error: error?.message || 'File not found' }, { status: 404 });
+      return NextResponse.json({ error: error?.message || 'Not found' }, { status: 404 });
     }
 
     const ext = path.split('.').pop()?.toLowerCase() || '';
-    const contentType = CONTENT_TYPES[ext] || 'application/octet-stream';
+    const contentType = MIME[ext] || 'application/octet-stream';
     const buf = await data.arrayBuffer();
 
     return new NextResponse(buf, {
       status: 200,
       headers: {
-        'Content-Type': contentType,
-        'Content-Length': String(buf.byteLength),
-        // Allow browser to cache for 1 hour
-        'Cache-Control': 'private, max-age=3600',
-        // Ensure inline display (not download prompt) for supported types
+        'Content-Type':        contentType,
+        'Content-Length':      String(buf.byteLength),
+        // CRITICAL: inline means "display in browser", not "download"
         'Content-Disposition': 'inline',
+        'Cache-Control':       'private, max-age=3600',
+        // Allow mammoth/SheetJS fetch() from the browser
+        'Access-Control-Allow-Origin': '*',
       },
     });
   } catch (err) {
