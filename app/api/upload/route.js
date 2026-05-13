@@ -2,7 +2,6 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 
-
 // POST /api/upload — upload a file to Supabase Storage
 // Accepts multipart/form-data with fields: file, materialId, version
 export async function POST(request) {
