@@ -103,20 +103,23 @@ function Spinner() {
 
 // ══════════════════════════════════════════════════════════════
 // DOCUMENT VIEWER
-// Files are served through /api/file-proxy which overrides
-// Supabase's Content-Disposition: attachment header, allowing
-// inline display in the browser instead of forcing a download.
+// Fetches through proxy → converts to blob URL → renders inline.
+// Blob URLs are always same-origin so the browser renders them
+// instead of triggering a download, regardless of server headers.
 // ══════════════════════════════════════════════════════════════
 function DocumentViewer({ fileUrl, filePath, fileName, type, onTextSelect }) {
-  const [docHtml,   setDocHtml]   = useState(null);
-  const [sheets,    setSheets]    = useState([]);
-  const [activeTab, setActiveTab] = useState(0);
-  const [loading,   setLoading]   = useState(false);
-  const [viewErr,   setViewErr]   = useState(null);
+  const [blobUrl,  setBlobUrl]  = useState(null);
+  const [docHtml,  setDocHtml]  = useState(null);
+  const [sheets,   setSheets]   = useState([]);
+  const [activeTab,setActiveTab]= useState(0);
+  const [loading,  setLoading]  = useState(false);
+  const [viewErr,  setViewErr]  = useState(null);
 
-  // All file access goes through our proxy — fixes Content-Disposition: attachment
-  // filePath is the Supabase storage path, e.g. "MAT-0001/v1/1234567890.docx"
-  var proxyUrl = filePath ? '/api/file-proxy?path=' + encodeURIComponent(filePath) : fileUrl;
+  // Proxy route strips Supabase's Content-Disposition: attachment header.
+  // If filePath is not available fall back to the direct URL.
+  var fetchUrl = filePath
+    ? '/api/file-proxy?path=' + encodeURIComponent(filePath)
+    : fileUrl;
 
   var loadScript = useCallback(function(src) {
     return new Promise(function(res, rej) {
@@ -124,48 +127,68 @@ function DocumentViewer({ fileUrl, filePath, fileName, type, onTextSelect }) {
       var s = document.createElement('script');
       s.src = src;
       s.onload = res;
-      s.onerror = function() { rej(new Error('Failed to load ' + src)); };
+      s.onerror = function() { rej(new Error('Script load failed: ' + src)); };
       document.head.appendChild(s);
     });
   }, []);
 
   useEffect(function() {
-    if (!proxyUrl) return;
-    setDocHtml(null); setSheets([]); setViewErr(null); setActiveTab(0); setLoading(false);
-    if (type && type.indexOf('Word')  !== -1) doLoadDocx();
-    if (type && type.indexOf('Excel') !== -1) doLoadXlsx();
-  }, [proxyUrl, type]);
+    if (!fetchUrl) return;
+    // Reset state
+    setDocHtml(null); setSheets([]); setViewErr(null); setLoading(true);
+    // Revoke old blob URL to free memory
+    setBlobUrl(function(old) { if (old) URL.revokeObjectURL(old); return null; });
 
-  function doLoadDocx() {
-    setLoading(true);
-    loadScript('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js')
-      .then(function() { return fetch(proxyUrl); })
+    // Fetch the file and create a local blob URL — always renders inline
+    fetch(fetchUrl)
       .then(function(r) {
-        if (!r.ok) throw new Error('Fetch failed: HTTP ' + r.status);
-        return r.arrayBuffer();
+        if (!r.ok) throw new Error('Could not load file (HTTP ' + r.status + '). Make sure the file was uploaded after the latest deployment.');
+        return r.blob();
       })
-      .then(function(buf) { return window.mammoth.convertToHtml({ arrayBuffer: buf }); })
-      .then(function(result) { setDocHtml(result.value || '<p>Empty document.</p>'); setLoading(false); })
-      .catch(function(e) { console.error('docx load error', e); setViewErr(e.message); setLoading(false); });
-  }
+      .then(function(blob) {
+        var url = URL.createObjectURL(blob);
+        setBlobUrl(url);
 
-  function doLoadXlsx() {
-    setLoading(true);
-    loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js')
-      .then(function() { return fetch(proxyUrl); })
-      .then(function(r) {
-        if (!r.ok) throw new Error('Fetch failed: HTTP ' + r.status);
-        return r.arrayBuffer();
+        // For Word/Excel, also parse content for inline rendering
+        if (type && type.indexOf('Word') !== -1) {
+          return loadScript('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js')
+            .then(function() {
+              return blob.arrayBuffer();
+            })
+            .then(function(buf) {
+              return window.mammoth.convertToHtml({ arrayBuffer: buf });
+            })
+            .then(function(result) {
+              setDocHtml(result.value || '<p>Empty document.</p>');
+              setLoading(false);
+            });
+        }
+        if (type && type.indexOf('Excel') !== -1) {
+          return loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js')
+            .then(function() {
+              return blob.arrayBuffer();
+            })
+            .then(function(buf) {
+              var wb = window.XLSX.read(buf, { type: 'array' });
+              var parsed = wb.SheetNames.map(function(n) {
+                return { name: n, html: window.XLSX.utils.sheet_to_html(wb.Sheets[n]) };
+              });
+              setSheets(parsed);
+              setLoading(false);
+            });
+        }
+        setLoading(false);
       })
-      .then(function(buf) {
-        var wb = window.XLSX.read(buf, { type: 'array' });
-        var parsed = wb.SheetNames.map(function(n) {
-          return { name: n, html: window.XLSX.utils.sheet_to_html(wb.Sheets[n]) };
-        });
-        setSheets(parsed); setLoading(false);
-      })
-      .catch(function(e) { console.error('xlsx load error', e); setViewErr(e.message); setLoading(false); });
-  }
+      .catch(function(e) {
+        console.error('DocumentViewer error:', e);
+        setViewErr(e.message);
+        setLoading(false);
+      });
+
+    return function() {
+      setBlobUrl(function(old) { if (old) URL.revokeObjectURL(old); return null; });
+    };
+  }, [fetchUrl, type]);
 
   function handleMouseUp() {
     try {
@@ -174,7 +197,8 @@ function DocumentViewer({ fileUrl, filePath, fileName, type, onTextSelect }) {
     } catch(e) {}
   }
 
-  if (!proxyUrl) return (
+  // ── Empty state ────────────────────────────────────────────────
+  if (!fetchUrl) return (
     <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',background:'#f8fafc'}}>
       <div style={{textAlign:'center',color:'#94a3b8'}}>
         <div style={{fontSize:52,marginBottom:10}}>{fileIcon(type)}</div>
@@ -183,36 +207,41 @@ function DocumentViewer({ fileUrl, filePath, fileName, type, onTextSelect }) {
     </div>
   );
 
+  // ── Loading ────────────────────────────────────────────────────
   if (loading) return (
-    <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:12,background:'#f8fafc'}}>
-      <div style={{width:32,height:32,border:'3px solid #e2e8f0',borderTopColor:'#1e3a5f',borderRadius:'50%',animation:'spin 0.7s linear infinite'}}/>
+    <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:14,background:'#f8fafc'}}>
+      <div style={{width:36,height:36,border:'3px solid #e2e8f0',borderTopColor:'#1e3a5f',borderRadius:'50%',animation:'spin 0.7s linear infinite'}}/>
       <p style={{fontSize:13,color:'#64748b',fontWeight:600}}>Loading document…</p>
     </div>
   );
 
+  // ── Error ──────────────────────────────────────────────────────
   if (viewErr) return (
     <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',background:'#fef2f2',padding:32}}>
-      <div style={{textAlign:'center',maxWidth:340}}>
+      <div style={{textAlign:'center',maxWidth:380}}>
         <div style={{fontSize:40,marginBottom:12}}>⚠️</div>
         <p style={{fontWeight:700,color:'#991b1b',marginBottom:8}}>Could not load document</p>
         <p style={{fontSize:12,color:'#dc2626',marginBottom:4}}>{viewErr}</p>
-        <p style={{fontSize:11,color:'#94a3b8',marginBottom:16}}>The file may have been uploaded before the proxy was enabled. Re-upload the file to fix this.</p>
-        <a href={proxyUrl} target="_blank" rel="noreferrer"
+        <p style={{fontSize:11,color:'#94a3b8',marginBottom:16}}>Try re-uploading the file — older files may not have been stored with a path.</p>
+        <a href={fileUrl || fetchUrl} target="_blank" rel="noreferrer"
           style={{display:'inline-flex',alignItems:'center',gap:6,padding:'8px 16px',background:'#1e3a5f',color:'#fff',borderRadius:10,fontSize:13,fontWeight:700,textDecoration:'none'}}>
-          Open / Download
+          Try Opening Directly ↗
         </a>
       </div>
     </div>
   );
 
-  // ── PDF — proxy strips the attachment header so iframe works ───
+  // ── PDF — blob URL renders inline in every browser ─────────────
   if (type === 'PDF Document') return (
     <div style={{flex:1,overflow:'hidden',display:'flex',flexDirection:'column'}}>
       <div style={{background:'#f8fafc',borderBottom:'1px solid #e2e8f0',padding:'6px 14px',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
         <span style={{fontSize:11,color:'#94a3b8',fontWeight:600}}>📄 {fileName}</span>
-        <a href={proxyUrl} target="_blank" rel="noreferrer" style={{fontSize:11,color:'#1e3a5f',fontWeight:700,textDecoration:'none'}}>Open in new tab ↗</a>
+        <a href={blobUrl || fetchUrl} target="_blank" rel="noreferrer" style={{fontSize:11,color:'#1e3a5f',fontWeight:700,textDecoration:'none'}}>Open in new tab ↗</a>
       </div>
-      <iframe src={proxyUrl} style={{flex:1,width:'100%',border:'none'}} title="PDF Viewer"/>
+      {blobUrl
+        ? <iframe src={blobUrl} style={{flex:1,width:'100%',border:'none'}} title="PDF Viewer"/>
+        : <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center'}}><Spinner/></div>
+      }
     </div>
   );
 
@@ -221,7 +250,7 @@ function DocumentViewer({ fileUrl, filePath, fileName, type, onTextSelect }) {
     <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',background:'linear-gradient(135deg,#f0f9ff,#e0e7ff)',gap:20,padding:40}}>
       <div style={{width:80,height:80,borderRadius:20,background:'#e0e7ff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:36}}>🎵</div>
       <p style={{fontWeight:700,color:'#3730a3'}}>{fileName}</p>
-      <audio controls src={proxyUrl} style={{width:'100%',maxWidth:420,borderRadius:8}}/>
+      {blobUrl && <audio controls src={blobUrl} style={{width:'100%',maxWidth:420,borderRadius:8}}/>}
       <p style={{fontSize:12,color:'#6366f1'}}>Add timestamped comments in the panel on the right</p>
     </div>
   );
@@ -229,18 +258,18 @@ function DocumentViewer({ fileUrl, filePath, fileName, type, onTextSelect }) {
   // ── VIDEO ──────────────────────────────────────────────────────
   if (type === 'Video File') return (
     <div style={{flex:1,background:'#0f172a',display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
-      <video controls src={proxyUrl} style={{maxHeight:'100%',maxWidth:'100%',borderRadius:8}}/>
+      {blobUrl && <video controls src={blobUrl} style={{maxHeight:'100%',maxWidth:'100%',borderRadius:8}}/>}
     </div>
   );
 
-  // ── WORD — mammoth renders to HTML ────────────────────────────
+  // ── WORD — mammoth renders HTML ────────────────────────────────
   if (type && type.indexOf('Word') !== -1) return (
     <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
       <div style={{background:'#f8fafc',borderBottom:'1px solid #e2e8f0',padding:'6px 14px',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
         <span style={{fontSize:11,color:'#94a3b8',fontWeight:600}}>📝 {fileName}</span>
         <div style={{display:'flex',alignItems:'center',gap:12}}>
           <span style={{fontSize:11,color:'#6366f1',fontWeight:600}}>💡 Select text to reference in a comment</span>
-          <a href={proxyUrl} download={fileName} style={{fontSize:11,color:'#1e3a5f',fontWeight:700,textDecoration:'none'}}>⬇ Download</a>
+          {blobUrl && <a href={blobUrl} download={fileName} style={{fontSize:11,color:'#1e3a5f',fontWeight:700,textDecoration:'none'}}>⬇ Download</a>}
         </div>
       </div>
       <div style={{flex:1,overflowY:'auto',padding:'32px 40px',background:'#fff'}} onMouseUp={handleMouseUp}>
@@ -253,7 +282,7 @@ function DocumentViewer({ fileUrl, filePath, fileName, type, onTextSelect }) {
     </div>
   );
 
-  // ── EXCEL — SheetJS renders to HTML table ─────────────────────
+  // ── EXCEL — SheetJS renders table ─────────────────────────────
   if (type && type.indexOf('Excel') !== -1) return (
     <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
       {sheets.length > 1 && (
@@ -278,17 +307,15 @@ function DocumentViewer({ fileUrl, filePath, fileName, type, onTextSelect }) {
     </div>
   );
 
-  // ── POWERPOINT — Google Docs Viewer needs a public URL ────────
+  // ── POWERPOINT — Google Docs Viewer ───────────────────────────
   if (type && type.indexOf('PowerPoint') !== -1) {
-    var fullProxyUrl = typeof window !== 'undefined'
-      ? window.location.origin + proxyUrl
-      : proxyUrl;
-    var gdocsUrl = 'https://docs.google.com/viewer?url=' + encodeURIComponent(fullProxyUrl) + '&embedded=true';
+    var origin = typeof window !== 'undefined' ? window.location.origin : '';
+    var gdocsUrl = 'https://docs.google.com/viewer?url=' + encodeURIComponent(origin + '/api/file-proxy?path=' + encodeURIComponent(filePath || '')) + '&embedded=true';
     return (
       <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
         <div style={{background:'#f8fafc',borderBottom:'1px solid #e2e8f0',padding:'6px 14px',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
           <span style={{fontSize:11,color:'#94a3b8',fontWeight:600}}>📋 {fileName}</span>
-          <a href={proxyUrl} download={fileName} style={{fontSize:11,color:'#1e3a5f',fontWeight:700,textDecoration:'none'}}>⬇ Download</a>
+          {blobUrl && <a href={blobUrl} download={fileName} style={{fontSize:11,color:'#1e3a5f',fontWeight:700,textDecoration:'none'}}>⬇ Download</a>}
         </div>
         <iframe src={gdocsUrl} style={{flex:1,width:'100%',border:'none'}} title="PowerPoint Viewer"/>
       </div>
@@ -302,14 +329,17 @@ function DocumentViewer({ fileUrl, filePath, fileName, type, onTextSelect }) {
         <div style={{fontSize:56,marginBottom:14}}>{fileIcon(type)}</div>
         <p style={{fontWeight:700,color:'#1e293b',marginBottom:6}}>{fileName}</p>
         <p style={{fontSize:13,color:'#64748b',marginBottom:20}}>Download to review, then add comments in the right panel.</p>
-        <a href={proxyUrl} download={fileName} target="_blank" rel="noreferrer"
-          style={{display:'inline-flex',alignItems:'center',gap:6,padding:'9px 18px',background:'#1e3a5f',color:'#fff',borderRadius:10,fontSize:13,fontWeight:700,textDecoration:'none'}}>
-          ⬇ Download to Review
-        </a>
+        {blobUrl && (
+          <a href={blobUrl} download={fileName}
+            style={{display:'inline-flex',alignItems:'center',gap:6,padding:'9px 18px',background:'#1e3a5f',color:'#fff',borderRadius:10,fontSize:13,fontWeight:700,textDecoration:'none'}}>
+            ⬇ Download to Review
+          </a>
+        )}
       </div>
     </div>
   );
 }
+
 
 
 
