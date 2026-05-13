@@ -102,33 +102,209 @@ function Spinner() {
 }
 
 // ══════════════════════════════════════════════════════════════
-// DOCUMENT VIEWER
+// DOCUMENT VIEWER — inline for all file types
 // ══════════════════════════════════════════════════════════════
-function DocumentViewer({ fileUrl, fileName, type }) {
+function DocumentViewer({ fileUrl, fileName, type, onTextSelect }) {
+  const [docHtml,   setDocHtml]   = useState(null);
+  const [sheets,    setSheets]    = useState([]);
+  const [activeTab, setActiveTab] = useState(0);
+  const [loading,   setLoading]   = useState(false);
+  const [viewErr,   setViewErr]   = useState(null);
+
+  // Dynamically load a script once
+  const loadScript = (src) => new Promise((res, rej) => {
+    if (document.querySelector(`script[src="${src}"]`)) { res(); return; }
+    const s = document.createElement('script');
+    s.src = src; s.onload = res; s.onerror = () => rej(new Error('Script load failed: ' + src));
+    document.head.appendChild(s);
+  });
+
+  useEffect(() => {
+    if (!fileUrl) return;
+    setDocHtml(null); setSheets([]); setViewErr(null); setActiveTab(0);
+    if (type?.includes('Word'))  loadDocx();
+    if (type?.includes('Excel')) loadXlsx();
+  }, [fileUrl, type]);
+
+  const loadDocx = async () => {
+    setLoading(true);
+    try {
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js');
+      const r   = await fetch(fileUrl);
+      const buf = await r.arrayBuffer();
+      const { value, messages } = await window.mammoth.convertToHtml({ arrayBuffer: buf });
+      setDocHtml(value || '<p style="color:#94a3b8">Document appears to be empty.</p>');
+    } catch (e) { setViewErr(e.message); }
+    setLoading(false);
+  };
+
+  const loadXlsx = async () => {
+    setLoading(true);
+    try {
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+      const r   = await fetch(fileUrl);
+      const buf = await r.arrayBuffer();
+      const wb  = window.XLSX.read(buf, { type: 'array' });
+      const parsed = wb.SheetNames.map(name => ({
+        name,
+        html: window.XLSX.utils.sheet_to_html(wb.Sheets[name], { editable: false }),
+      }));
+      setSheets(parsed);
+    } catch (e) { setViewErr(e.message); }
+    setLoading(false);
+  };
+
+  // Highlight selected text → pre-fill comment reference
+  const handleMouseUp = () => {
+    const sel = window.getSelection()?.toString()?.trim();
+    if (sel && onTextSelect) onTextSelect('"' + sel.substring(0, 80) + '"');
+  };
+
+  // ── Shared loading / error states ─────────────────────────────
   if (!fileUrl) return (
     <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',background:'#f8fafc'}}>
-      <div style={{textAlign:'center',color:'#94a3b8'}}><div style={{fontSize:52,marginBottom:10}}>{fileIcon(type)}</div><p style={{fontSize:13,fontWeight:600}}>No file</p></div>
+      <div style={{textAlign:'center',color:'#94a3b8'}}><div style={{fontSize:52,marginBottom:10}}>{fileIcon(type)}</div><p style={{fontSize:13,fontWeight:600}}>No file uploaded</p></div>
     </div>
   );
-  if (type==='PDF Document') return <div style={{flex:1,overflow:'hidden'}}><iframe src={fileUrl} style={{width:'100%',height:'100%',border:'none'}} title="PDF"/></div>;
-  if (type==='Audio File') return (
+
+  if (loading) return (
+    <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',background:'#f8fafc'}}>
+      <div style={{textAlign:'center',color:'#94a3b8'}}>
+        <div style={{fontSize:36,marginBottom:12,animation:'spin 1s linear infinite',display:'inline-block'}}>⏳</div>
+        <p style={{fontSize:13,fontWeight:600,marginTop:8}}>Loading document…</p>
+      </div>
+    </div>
+  );
+
+  if (viewErr) return (
+    <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',background:'#fef2f2',padding:32}}>
+      <div style={{textAlign:'center',maxWidth:320}}>
+        <div style={{fontSize:40,marginBottom:12}}>⚠️</div>
+        <p style={{fontWeight:700,color:'#991b1b',marginBottom:8}}>Could not render document</p>
+        <p style={{fontSize:12,color:'#dc2626',marginBottom:16}}>{viewErr}</p>
+        <a href={fileUrl} download={fileName} target="_blank" rel="noreferrer"
+          style={{display:'inline-flex',alignItems:'center',gap:6,padding:'8px 16px',background:'#1e3a5f',color:'#fff',borderRadius:10,fontSize:13,fontWeight:700,textDecoration:'none'}}>
+          ⬇ Download Instead
+        </a>
+      </div>
+    </div>
+  );
+
+  // ── PDF ───────────────────────────────────────────────────────
+  if (type === 'PDF Document') return (
+    <div style={{flex:1,overflow:'hidden',display:'flex',flexDirection:'column'}}>
+      <div style={{background:'#f8fafc',borderBottom:'1px solid #e2e8f0',padding:'6px 14px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+        <span style={{fontSize:11,color:'#94a3b8',fontWeight:600}}>📄 {fileName}</span>
+        <a href={fileUrl} target="_blank" rel="noreferrer" style={{fontSize:11,color:'#1e3a5f',fontWeight:700,textDecoration:'none'}}>Open in new tab ↗</a>
+      </div>
+      <iframe src={fileUrl} style={{flex:1,width:'100%',border:'none'}} title="PDF Viewer"/>
+    </div>
+  );
+
+  // ── WORD / DOCX ───────────────────────────────────────────────
+  if (type?.includes('Word')) return (
+    <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+      <div style={{background:'#f8fafc',borderBottom:'1px solid #e2e8f0',padding:'6px 14px',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
+        <span style={{fontSize:11,color:'#94a3b8',fontWeight:600}}>📝 {fileName}</span>
+        <span style={{fontSize:11,color:'#6366f1',fontWeight:600}}>💡 Select text to reference it in a comment</span>
+      </div>
+      <div style={{flex:1,overflowY:'auto',padding:'32px 40px',background:'#fff'}} onMouseUp={handleMouseUp}>
+        <style>{`
+          .docx-body{max-width:720px;margin:0 auto;font-family:Georgia,'Times New Roman',serif;font-size:14px;line-height:1.8;color:#1e293b}
+          .docx-body h1{font-size:22px;font-weight:700;margin:24px 0 12px;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:8px}
+          .docx-body h2{font-size:18px;font-weight:700;margin:20px 0 8px;color:#1e293b}
+          .docx-body h3{font-size:15px;font-weight:700;margin:16px 0 6px;color:#334155}
+          .docx-body p{margin:0 0 10px}
+          .docx-body table{border-collapse:collapse;width:100%;margin:16px 0}
+          .docx-body td,.docx-body th{border:1px solid #e2e8f0;padding:8px 12px;font-size:13px}
+          .docx-body th{background:#f8fafc;font-weight:700}
+          .docx-body ul,.docx-body ol{margin:8px 0 8px 24px}
+          .docx-body li{margin-bottom:4px}
+          .docx-body strong{font-weight:700}
+          .docx-body em{font-style:italic}
+          ::selection{background:#c7d2fe;color:#1e293b}
+        `}</style>
+        {docHtml
+          ? <div className="docx-body" dangerouslySetInnerHTML={{ __html: docHtml }}/>
+          : <div style={{textAlign:'center',color:'#94a3b8',paddingTop:60}}><Spinner/><p style={{marginTop:12}}>Rendering…</p></div>
+        }
+      </div>
+    </div>
+  );
+
+  // ── EXCEL / XLSX ───────────────────────────────────────────────
+  if (type?.includes('Excel')) return (
+    <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+      {sheets.length > 1 && (
+        <div style={{display:'flex',gap:4,padding:'8px 12px',background:'#f8fafc',borderBottom:'1px solid #e2e8f0',flexShrink:0,overflowX:'auto'}}>
+          {sheets.map((s,i) => (
+            <button key={i} onClick={()=>setActiveTab(i)}
+              style={{padding:'4px 12px',borderRadius:6,border:'1px solid #e2e8f0',fontSize:11,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap',fontFamily:'inherit',
+                background:activeTab===i?'#1e3a5f':'#fff',color:activeTab===i?'#fff':'#64748b',transition:'all 0.15s'}}>
+              {s.name}
+            </button>
+          ))}
+          <span style={{marginLeft:'auto',fontSize:11,color:'#94a3b8',alignSelf:'center',whiteSpace:'nowrap'}}>📊 {fileName}</span>
+        </div>
+      )}
+      <div style={{flex:1,overflow:'auto',padding:16,background:'#fff'}} onMouseUp={handleMouseUp}>
+        <style>{`
+          .xlsx-wrap table{border-collapse:collapse;font-size:12px;font-family:'DM Mono',monospace;min-width:100%}
+          .xlsx-wrap td,.xlsx-wrap th{border:1px solid #e2e8f0;padding:5px 10px;white-space:nowrap;text-align:left;color:#334155}
+          .xlsx-wrap tr:first-child td,.xlsx-wrap th{background:#f8fafc;font-weight:700;color:#0f172a;position:sticky;top:0;z-index:1}
+          .xlsx-wrap tr:hover td{background:#f0f4ff}
+          ::selection{background:#c7d2fe;color:#1e293b}
+        `}</style>
+        {sheets.length > 0
+          ? <div className="xlsx-wrap" dangerouslySetInnerHTML={{ __html: sheets[activeTab]?.html || '' }}/>
+          : <div style={{textAlign:'center',color:'#94a3b8',paddingTop:60}}><Spinner/><p style={{marginTop:12}}>Parsing spreadsheet…</p></div>
+        }
+      </div>
+    </div>
+  );
+
+  // ── POWERPOINT / PPTX ─────────────────────────────────────────
+  if (type?.includes('PowerPoint') || type?.includes('pptx')) {
+    const officeUrl = `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(fileUrl)}`;
+    return (
+      <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+        <div style={{background:'#f8fafc',borderBottom:'1px solid #e2e8f0',padding:'6px 14px',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
+          <span style={{fontSize:11,color:'#94a3b8',fontWeight:600}}>📊 {fileName}</span>
+          <a href={fileUrl} download={fileName} style={{fontSize:11,color:'#1e3a5f',fontWeight:700,textDecoration:'none'}}>⬇ Download</a>
+        </div>
+        <iframe src={officeUrl} style={{flex:1,width:'100%',border:'none'}} title="PowerPoint Viewer"
+          onError={()=>setViewErr('Could not load PowerPoint viewer. Please download the file to review.')}/>
+      </div>
+    );
+  }
+
+  // ── AUDIO ─────────────────────────────────────────────────────
+  if (type === 'Audio File') return (
     <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',background:'linear-gradient(135deg,#f0f9ff,#e0e7ff)',gap:20,padding:40}}>
-      <div style={{width:80,height:80,borderRadius:20,background:'#e0e7ff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:36}}>🎵</div>
-      <p style={{fontWeight:700,color:'#3730a3'}}>{fileName}</p>
-      <audio controls src={fileUrl} style={{width:'100%',maxWidth:380,borderRadius:8}}/>
+      <div style={{width:80,height:80,borderRadius:20,background:'#e0e7ff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:36,boxShadow:'0 4px 20px rgba(99,102,241,0.2)'}}>🎵</div>
+      <div style={{textAlign:'center'}}>
+        <p style={{fontWeight:700,color:'#3730a3',marginBottom:4}}>{fileName}</p>
+        <p style={{fontSize:12,color:'#6366f1'}}>Use the timestamp field in the comment panel →</p>
+      </div>
+      <audio controls src={fileUrl} style={{width:'100%',maxWidth:420,borderRadius:8}}/>
     </div>
   );
-  if (type==='Video File') return (
-    <div style={{flex:1,background:'#0f172a',display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
-      <video controls src={fileUrl} style={{maxHeight:'100%',maxWidth:'100%',borderRadius:8}}/>
+
+  // ── VIDEO ─────────────────────────────────────────────────────
+  if (type === 'Video File') return (
+    <div style={{flex:1,background:'#0f172a',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:16,gap:12}}>
+      <video controls src={fileUrl} style={{maxHeight:'85%',maxWidth:'100%',borderRadius:8,boxShadow:'0 20px 60px rgba(0,0,0,0.5)'}}/>
+      <p style={{fontSize:11,color:'#475569'}}>Use the timestamp field in the comment panel to reference a specific moment</p>
     </div>
   );
+
+  // ── FALLBACK (Other) ──────────────────────────────────────────
   return (
     <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',background:'linear-gradient(135deg,#f8fafc,#eff6ff)',padding:40}}>
       <div style={{textAlign:'center',maxWidth:280,background:'#fff',borderRadius:20,padding:36,boxShadow:'0 4px 20px rgba(0,0,0,0.06)',border:'1px solid #e2e8f0'}}>
         <div style={{fontSize:56,marginBottom:14}}>{fileIcon(type)}</div>
         <p style={{fontWeight:700,color:'#1e293b',marginBottom:6}}>{fileName}</p>
-        <p style={{fontSize:13,color:'#64748b',marginBottom:20}}>Download to review, then add annotations in the comments panel.</p>
+        <p style={{fontSize:13,color:'#64748b',marginBottom:20}}>Preview not available for this file type. Download to review, then add comments in the right panel.</p>
         <a href={fileUrl} download={fileName} target="_blank" rel="noreferrer"
           style={{display:'inline-flex',alignItems:'center',gap:6,padding:'9px 18px',background:'#1e3a5f',color:'#fff',borderRadius:10,fontSize:13,fontWeight:700,textDecoration:'none'}}>
           ⬇ Download to Review
@@ -141,11 +317,16 @@ function DocumentViewer({ fileUrl, fileName, type }) {
 // ══════════════════════════════════════════════════════════════
 // ANNOTATION PANEL
 // ══════════════════════════════════════════════════════════════
-function AnnotationPanel({ material, currentVersion, roleId, user, onAdd, onResolve }) {
+function AnnotationPanel({ material, currentVersion, roleId, user, onAdd, onResolve, prefillRef, onPrefillUsed }) {
   const [text, setText] = useState('');
   const [ref_, setRef_] = useState('');
   const [filter, setFilter] = useState('open');
   const [saving, setSaving] = useState(false);
+
+  // When parent sends a text-selection reference, populate the field
+  useEffect(() => {
+    if (prefillRef) { setRef_(prefillRef); if (onPrefillUsed) onPrefillUsed(); }
+  }, [prefillRef]);
 
   const anns = currentVersion?.annotations || [];
   const shown = filter==='all'?anns : filter==='open'?anns.filter(a=>!a.resolved) : anns.filter(a=>a.resolved);
@@ -571,6 +752,7 @@ function Dashboard({ materials, roleId, curUser, onSelect, onSubmit, loading }) 
 // ══════════════════════════════════════════════════════════════
 function MaterialDetail({ mat, roleId, user, onBack, onVerdict, onAddAnn, onResolveAnn, onResubmit, onInitiateCert, onShowCert, busy }) {
   const curV = mat.versions?.find(v=>v.version_number===mat.current_version);
+  const [prefillRef, setPrefillRef] = useState('');
   return (
     <div style={{display:'flex',flexDirection:'column',height:'calc(100vh - 108px)'}}>
       {/* Sub-header */}
@@ -639,8 +821,8 @@ function MaterialDetail({ mat, roleId, user, onBack, onVerdict, onAddAnn, onReso
         {/* Viewer + annotations */}
         <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
           <div style={{flex:1,display:'flex',overflow:'hidden'}}>
-            <DocumentViewer fileUrl={curV?.file_url} fileName={curV?.file_name} type={mat.type}/>
-            <AnnotationPanel material={mat} currentVersion={curV} roleId={roleId} user={user} onAdd={onAddAnn} onResolve={onResolveAnn}/>
+            <DocumentViewer fileUrl={curV?.file_url} fileName={curV?.file_name} type={mat.type} onTextSelect={setPrefillRef}/>
+            <AnnotationPanel material={mat} currentVersion={curV} roleId={roleId} user={user} onAdd={onAddAnn} onResolve={onResolveAnn} prefillRef={prefillRef} onPrefillUsed={()=>setPrefillRef('')}/>
           </div>
 
           {/* Action bars */}
