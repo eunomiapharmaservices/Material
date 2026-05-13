@@ -134,60 +134,48 @@ function DocumentViewer({ fileUrl, filePath, fileName, type, onTextSelect }) {
 
   useEffect(function() {
     if (!fetchUrl) return;
-    // Reset state
     setDocHtml(null); setSheets([]); setViewErr(null); setLoading(true);
-    // Revoke old blob URL to free memory
     setBlobUrl(function(old) { if (old) URL.revokeObjectURL(old); return null; });
 
-    // Fetch the file and create a local blob URL — always renders inline
     fetch(fetchUrl)
       .then(function(r) {
         if (!r.ok) throw new Error('Could not load file (HTTP ' + r.status + '). Make sure the file was uploaded after the latest deployment.');
-        return r.blob();
+        // Use arrayBuffer so we can explicitly type the Blob
+        return r.arrayBuffer();
       })
-      .then(function(blob) {
+      .then(function(buf) {
+        // Detect MIME type from extension for reliable inline rendering
+        var ext = (fileName || '').split('.').pop().toLowerCase();
+        var mimeMap = {
+          pdf: 'application/pdf',
+          docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          doc: 'application/msword',
+          xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          mp3: 'audio/mpeg', wav: 'audio/wav', mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm',
+        };
+        var mime = mimeMap[ext] || 'application/octet-stream';
+        var blob = new Blob([buf], { type: mime });
         var url = URL.createObjectURL(blob);
         setBlobUrl(url);
 
-        // For Word/Excel, also parse content for inline rendering
         if (type && type.indexOf('Word') !== -1) {
           return loadScript('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js')
-            .then(function() {
-              return blob.arrayBuffer();
-            })
-            .then(function(buf) {
-              return window.mammoth.convertToHtml({ arrayBuffer: buf });
-            })
-            .then(function(result) {
-              setDocHtml(result.value || '<p>Empty document.</p>');
-              setLoading(false);
-            });
+            .then(function() { return window.mammoth.convertToHtml({ arrayBuffer: buf }); })
+            .then(function(result) { setDocHtml(result.value || '<p>Empty document.</p>'); setLoading(false); });
         }
         if (type && type.indexOf('Excel') !== -1) {
           return loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js')
             .then(function() {
-              return blob.arrayBuffer();
-            })
-            .then(function(buf) {
               var wb = window.XLSX.read(buf, { type: 'array' });
-              var parsed = wb.SheetNames.map(function(n) {
-                return { name: n, html: window.XLSX.utils.sheet_to_html(wb.Sheets[n]) };
-              });
-              setSheets(parsed);
+              setSheets(wb.SheetNames.map(function(n) { return { name: n, html: window.XLSX.utils.sheet_to_html(wb.Sheets[n]) }; }));
               setLoading(false);
             });
         }
         setLoading(false);
       })
-      .catch(function(e) {
-        console.error('DocumentViewer error:', e);
-        setViewErr(e.message);
-        setLoading(false);
-      });
+      .catch(function(e) { console.error('DocumentViewer:', e); setViewErr(e.message); setLoading(false); });
 
-    return function() {
-      setBlobUrl(function(old) { if (old) URL.revokeObjectURL(old); return null; });
-    };
+    return function() { setBlobUrl(function(old) { if (old) URL.revokeObjectURL(old); return null; }); };
   }, [fetchUrl, type]);
 
   function handleMouseUp() {
@@ -231,15 +219,23 @@ function DocumentViewer({ fileUrl, filePath, fileName, type, onTextSelect }) {
     </div>
   );
 
-  // ── PDF — blob URL renders inline in every browser ─────────────
+  // ── PDF — <object> renders inline; iframe shows Chrome download UI ──
   if (type === 'PDF Document') return (
     <div style={{flex:1,overflow:'hidden',display:'flex',flexDirection:'column'}}>
       <div style={{background:'#f8fafc',borderBottom:'1px solid #e2e8f0',padding:'6px 14px',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
         <span style={{fontSize:11,color:'#94a3b8',fontWeight:600}}>📄 {fileName}</span>
-        <a href={blobUrl || fetchUrl} target="_blank" rel="noreferrer" style={{fontSize:11,color:'#1e3a5f',fontWeight:700,textDecoration:'none'}}>Open in new tab ↗</a>
+        {blobUrl && <a href={blobUrl} target="_blank" rel="noreferrer" style={{fontSize:11,color:'#1e3a5f',fontWeight:700,textDecoration:'none'}}>Open in new tab ↗</a>}
       </div>
       {blobUrl
-        ? <iframe src={blobUrl} style={{flex:1,width:'100%',border:'none'}} title="PDF Viewer"/>
+        ? <object data={blobUrl} type="application/pdf" style={{flex:1,width:'100%',border:'none',display:'block'}}>
+            <div style={{padding:40,textAlign:'center',color:'#64748b'}}>
+              <p style={{marginBottom:16,fontSize:13}}>Your browser cannot display this PDF inline.</p>
+              <a href={blobUrl} target="_blank" rel="noreferrer"
+                style={{padding:'9px 18px',background:'#1e3a5f',color:'#fff',borderRadius:10,fontSize:13,fontWeight:700,textDecoration:'none'}}>
+                Open PDF ↗
+              </a>
+            </div>
+          </object>
         : <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center'}}><Spinner/></div>
       }
     </div>
