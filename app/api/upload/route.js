@@ -2,7 +2,6 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 
-export const config = { api: { bodyParser: false } };
 
 // POST /api/upload — upload a file to Supabase Storage
 // Accepts multipart/form-data with fields: file, materialId, version
