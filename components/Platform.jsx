@@ -600,11 +600,14 @@ function DocumentViewer({ fileUrl, filePath, fileName, type, canAnnotate, annota
 // ══════════════════════════════════════════════════════════════
 // ANNOTATION PANEL
 // ══════════════════════════════════════════════════════════════
-function AnnotationPanel({ material, currentVersion, roleId, user, onAdd, onResolve, prefillRef, onPrefillUsed }) {
+function AnnotationPanel({ material, currentVersion, roleId, user, onAdd, onEdit, onResolve, prefillRef, onPrefillUsed }) {
   const [text, setText] = useState('');
   const [ref_, setRef_] = useState('');
   const [filter, setFilter] = useState('open');
   const [saving, setSaving] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [editText,  setEditText]  = useState('');
+  const [editSaving, setEditSaving] = useState(false);
 
   // When parent sends a text-selection reference, populate the field
   useEffect(() => {
@@ -630,6 +633,15 @@ function AnnotationPanel({ material, currentVersion, roleId, user, onAdd, onReso
     } finally { setSaving(false); }
   };
 
+  const saveEdit = async (annId) => {
+    if (!editText.trim()||editSaving) return;
+    setEditSaving(true);
+    try {
+      await onEdit(annId, editText.trim());
+      setEditingId(null); setEditText('');
+    } finally { setEditSaving(false); }
+  };
+
   return (
     <div style={{width:272,flexShrink:0,display:'flex',flexDirection:'column',borderLeft:'1px solid #e2e8f0',background:'#fff'}}>
       <div style={{padding:'12px 14px',borderBottom:'1px solid #f1f5f9',background:'#fafbfc'}}>
@@ -649,21 +661,51 @@ function AnnotationPanel({ material, currentVersion, roleId, user, onAdd, onReso
         {shown.length===0&&<div style={{textAlign:'center',padding:'30px 0',color:'#94a3b8'}}><div style={{fontSize:28,marginBottom:8}}>💬</div><p style={{fontSize:12}}>No {filter!=='all'?filter:''} comments</p></div>}
         {shown.map(a=>{
           const c=roleColorMap[a.role]||roleColorMap.owner;
+          const isAuthor = a.author === user;
+          const isEditing = editingId === a.id;
+          const cleanRef = a.reference ? a.reference.replace(/\s*\(\d+%,\s*\d+%\)/,'') : '';
           return (
             <div key={a.id} style={{borderRadius:12,padding:'10px 12px',border:`1px solid ${a.resolved?'#f1f5f9':c.bd}`,background:a.resolved?'#fafafa':c.bg,opacity:a.resolved?0.6:1,fontSize:12}}>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:4}}>
-                <div style={{display:'flex',alignItems:'center',gap:6}}>
+                <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
                   <span style={{width:8,height:8,borderRadius:'50%',background:a.resolved?'#cbd5e1':c.dot,flexShrink:0}}/>
                   <span style={{fontWeight:700,color:'#334155'}}>{a.author}</span>
                   {a.is_cert&&<span style={{fontSize:10,color:'#7c3aed'}}>🔏 Cert</span>}
                 </div>
-                {!a.resolved&&roleId==='owner'&&(
-                  <button onClick={()=>onResolve(a.id)} style={{background:'none',border:'none',color:'#16a34a',fontWeight:800,fontSize:13,cursor:'pointer'}}>✓</button>
-                )}
+                <div style={{display:'flex',alignItems:'center',gap:4,flexShrink:0}}>
+                  {/* Edit button — only for the author, only if not resolved */}
+                  {isAuthor&&!a.resolved&&!isEditing&&(
+                    <button onClick={()=>{setEditingId(a.id);setEditText(a.body);}} title="Edit comment"
+                      style={{background:'none',border:'none',color:'#94a3b8',fontWeight:700,fontSize:12,cursor:'pointer',padding:'0 3px',lineHeight:1}}>✎</button>
+                  )}
+                  {/* Resolve button — owner marks as addressed */}
+                  {!a.resolved&&roleId==='owner'&&(
+                    <button onClick={()=>onResolve(a.id)} title="Mark as addressed"
+                      style={{background:'none',border:'none',color:'#16a34a',fontWeight:800,fontSize:13,cursor:'pointer',padding:'0 2px',lineHeight:1}}>✓</button>
+                  )}
+                </div>
               </div>
-              {a.reference&&<div style={{display:'inline-flex',alignItems:'center',gap:4,background:'rgba(255,255,255,0.8)',border:'1px solid #e2e8f0',borderRadius:6,padding:'2px 8px',fontSize:11,color:'#475569',fontWeight:600,marginBottom:6}}>📍 {a.reference.replace(/\s*\(\d+%,\s*\d+%\)/,'')}</div>}
-              <p style={{color:'#475569',lineHeight:1.6,marginTop:4}}>{a.body}</p>
-              <p style={{color:'#94a3b8',marginTop:6,fontSize:11}}>{fmt(a.created_at)}</p>
+              {cleanRef&&<div style={{display:'inline-flex',alignItems:'center',gap:4,background:'rgba(255,255,255,0.8)',border:'1px solid #e2e8f0',borderRadius:6,padding:'2px 8px',fontSize:11,color:'#475569',fontWeight:600,marginBottom:6}}>📍 {cleanRef}</div>}
+              {/* Normal view or inline edit */}
+              {isEditing ? (
+                <div style={{marginTop:6}}>
+                  <textarea value={editText} onChange={e=>setEditText(e.target.value)} rows={3} autoFocus
+                    style={{width:'100%',border:'1.5px solid #6366f1',borderRadius:8,padding:'7px 9px',fontSize:12,resize:'none',fontFamily:'inherit',outline:'none',marginBottom:8}}/>
+                  <div style={{display:'flex',gap:6}}>
+                    <button onClick={()=>saveEdit(a.id)} disabled={!editText.trim()||editSaving}
+                      style={{flex:1,padding:'6px',background:editText.trim()?'#1e3a5f':'#94a3b8',color:'#fff',border:'none',borderRadius:8,fontSize:11,fontWeight:700,cursor:editText.trim()?'pointer':'not-allowed',fontFamily:'inherit'}}>
+                      {editSaving?'Saving…':'Save'}
+                    </button>
+                    <button onClick={()=>{setEditingId(null);setEditText('');}}
+                      style={{padding:'6px 10px',background:'#f1f5f9',border:'none',borderRadius:8,fontSize:11,cursor:'pointer',fontFamily:'inherit',color:'#64748b'}}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <p style={{color:'#475569',lineHeight:1.6,marginTop:4}}>{a.body}</p>
+              )}
+              <p style={{color:'#94a3b8',marginTop:6,fontSize:11}}>{fmt(a.created_at)}{a.updated_at&&a.updated_at!==a.created_at?' · edited':''}</p>
               {a.resolved&&<p style={{color:'#16a34a',fontWeight:700,marginTop:4,fontSize:11}}>✓ Addressed</p>}
             </div>
           );
@@ -1033,7 +1075,7 @@ function Dashboard({ materials, roleId, curUser, onSelect, onSubmit, loading }) 
 // ══════════════════════════════════════════════════════════════
 // MATERIAL DETAIL
 // ══════════════════════════════════════════════════════════════
-function MaterialDetail({ mat, roleId, user, onBack, onVerdict, onAddAnn, onResolveAnn, onResubmit, onInitiateCert, onShowCert, busy }) {
+function MaterialDetail({ mat, roleId, user, onBack, onVerdict, onAddAnn, onEditAnn, onResolveAnn, onResubmit, onInitiateCert, onShowCert, busy }) {
   const curV = mat.versions?.find(v=>v.version_number===mat.current_version);
   const canAnnotate = (roleId==='reviewer'&&mat.status===ST.REVIEW)||(roleId==='signatory'&&mat.status===ST.CERT);
   const [prefillRef, setPrefillRef] = useState('');
@@ -1111,7 +1153,7 @@ function MaterialDetail({ mat, roleId, user, onBack, onVerdict, onAddAnn, onReso
               canAnnotate={canAnnotate} annotations={curV?.annotations}
               onAnnotate={handleAnnotate} onTextSelect={setPrefillRef}
             />
-            <AnnotationPanel material={mat} currentVersion={curV} roleId={roleId} user={user} onAdd={onAddAnn} onResolve={onResolveAnn} prefillRef={prefillRef} onPrefillUsed={()=>setPrefillRef('')}/>
+            <AnnotationPanel material={mat} currentVersion={curV} roleId={roleId} user={user} onAdd={onAddAnn} onEdit={onEditAnn} onResolve={onResolveAnn} prefillRef={prefillRef} onPrefillUsed={()=>setPrefillRef('')}/>
           </div>
 
           {/* Action bars */}
@@ -1235,6 +1277,18 @@ export default function Platform() {
     } catch (e) { setError(e.message); }
   };
 
+  // ── Edit annotation ──────────────────────────────────────────
+  const handleEditAnn = async (annId, newBody) => {
+    if (!sel) return;
+    try {
+      await apiFetch(`/api/materials/${sel.id}/annotations`, {
+        method: 'PATCH',
+        body: JSON.stringify({ annotation_id: annId, body: newBody }),
+      });
+      await loadDetail(sel.id);
+    } catch (e) { setError(e.message); }
+  };
+
   // ── Resolve annotation ───────────────────────────────────────
   const handleResolveAnn = async (annId) => {
     if (!sel) return;
@@ -1352,7 +1406,7 @@ export default function Platform() {
       <main style={{flex:1,overflow:'hidden',display:'flex',flexDirection:'column'}}>
         {view==='dashboard'&&<Dashboard materials={materials} roleId={role.id} curUser={role.user} onSelect={selectMaterial} onSubmit={()=>setView('submit')} loading={loading}/>}
         {view==='submit'&&role.id==='owner'&&<SubmitForm ownerName={role.user} onSubmit={handleSubmit} onCancel={()=>setView('dashboard')} busy={busy}/>}
-        {view==='detail'&&sel&&<MaterialDetail mat={sel} roleId={role.id} user={role.user} onBack={()=>setView('dashboard')} onVerdict={handleVerdict} onAddAnn={handleAddAnn} onResolveAnn={handleResolveAnn} onResubmit={handleResubmit} onInitiateCert={handleInitiateCert} onShowCert={()=>setShowCert(true)} busy={busy}/>}
+        {view==='detail'&&sel&&<MaterialDetail mat={sel} roleId={role.id} user={role.user} onBack={()=>setView('dashboard')} onVerdict={handleVerdict} onAddAnn={handleAddAnn} onEditAnn={handleEditAnn} onResolveAnn={handleResolveAnn} onResubmit={handleResubmit} onInitiateCert={handleInitiateCert} onShowCert={()=>setShowCert(true)} busy={busy}/>}
         {view==='detail'&&!sel&&loading&&<div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center'}}><Spinner/></div>}
       </main>
 
