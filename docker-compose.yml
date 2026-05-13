@@ -1,0 +1,48 @@
+version: '3.9'
+
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env.local
+    restart: unless-stopped
+    # Optional: add a healthcheck
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# ── Option 3 with a local Postgres (instead of Supabase cloud) ──
+# Uncomment the block below if you want fully on-premise storage.
+# You'll also need to swap the Supabase client for a direct pg client.
+#
+#  postgres:
+#    image: postgres:16-alpine
+#    environment:
+#      POSTGRES_DB: ep_platform
+#      POSTGRES_USER: ep_user
+#      POSTGRES_PASSWORD: changeme
+#    volumes:
+#      - pg_data:/var/lib/postgresql/data
+#      - ./supabase/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+#    ports:
+#      - "5432:5432"
+#
+#  minio:
+#    image: minio/minio
+#    command: server /data --console-address ":9001"
+#    environment:
+#      MINIO_ROOT_USER: minioadmin
+#      MINIO_ROOT_PASSWORD: changeme
+#    volumes:
+#      - minio_data:/data
+#    ports:
+#      - "9000:9000"
+#      - "9001:9001"
+#
+# volumes:
+#   pg_data:
+#   minio_data:
