@@ -106,25 +106,75 @@ function Spinner() {
 // regardless of CSP, sandbox, or Content-Disposition headers
 // ══════════════════════════════════════════════════════════════
 function PdfCanvasViewer({ arrayBuf, blobUrl, fileName, canAnnotate, annotations, onAnnotate }) {
-  var containerRef = useRef(null);
+  var containerRef  = useRef(null);
+  var overlayMapRef = useRef({});
   var [pdfLoading, setPdfLoading] = useState(true);
   var [pageCount,  setPageCount]  = useState(0);
-  var [popup, setPopup]           = useState(null); // {page, xPct, yPct, screenX, screenY}
-  var [popupText, setPopupText]   = useState('');
+  var [popup,      setPopup]      = useState(null);
+  var [popupText,  setPopupText]  = useState('');
   var popupRef = useRef(null);
 
   var PDFJS_CDN  = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
   var WORKER_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-  // Close popup when clicking outside
+  // Re-render pins whenever annotations change (without re-rendering the PDF)
   useEffect(function() {
-    function onOutsideClick(e) {
-      if (popupRef.current && !popupRef.current.contains(e.target)) setPopup(null);
-    }
-    document.addEventListener('mousedown', onOutsideClick);
-    return function() { document.removeEventListener('mousedown', onOutsideClick); };
+    var map = overlayMapRef.current;
+    Object.keys(map).forEach(function(pg) {
+      var overlay = map[pg];
+      if (!overlay) return;
+      // Clear old pins
+      Array.from(overlay.children).forEach(function(c) { if (c.dataset.pin) overlay.removeChild(c); });
+      var pageAnns = (annotations || []).filter(function(a) {
+        return a.reference && a.reference.indexOf('Page ' + pg + ' (') !== -1;
+      });
+      pageAnns.forEach(function(ann, idx) {
+        var m = ann.reference.match(/\((\d+)%,\s*(\d+)%\)/);
+        if (!m) return;
+        var xPct = parseInt(m[1]), yPct = parseInt(m[2]);
+        var isSig = ann.role === 'signatory';
+        var bg = isSig ? '#7c3aed' : '#f59e0b';
+        var num = idx + 1;
+
+        var pin = document.createElement('div');
+        pin.dataset.pin = '1';
+        pin.title = ann.body || '';
+        pin.style.cssText = 'position:absolute;left:' + xPct + '%;top:' + yPct + '%;transform:translate(-50%,-100%);z-index:6;pointer-events:auto;cursor:pointer;';
+
+        var bubble = document.createElement('div');
+        bubble.style.cssText = 'width:28px;height:28px;border-radius:50% 50% 50% 0;background:' + bg + ';transform:rotate(-45deg);border:2.5px solid #fff;display:flex;align-items:center;justify-content:center;box-shadow:0 3px 8px rgba(0,0,0,0.4);';
+        var numEl = document.createElement('span');
+        numEl.style.cssText = 'transform:rotate(45deg);color:#fff;font-size:11px;font-weight:900;font-family:sans-serif;line-height:1;';
+        numEl.textContent = num;
+        bubble.appendChild(numEl);
+        pin.appendChild(bubble);
+
+        // Tooltip
+        var tip = document.createElement('div');
+        tip.style.cssText = 'display:none;position:absolute;bottom:38px;left:50%;transform:translateX(-50%);background:#1e293b;color:#fff;font-size:11px;line-height:1.5;padding:8px 12px;border-radius:10px;min-width:160px;max-width:220px;word-break:break-word;box-shadow:0 4px 16px rgba(0,0,0,0.4);pointer-events:none;z-index:20;white-space:normal;text-align:left;';
+        tip.innerHTML = '<strong style="display:block;margin-bottom:3px;font-size:11px;">' + (ann.author || '') + '</strong>' + (ann.body || '');
+        // Arrow
+        var arrow = document.createElement('div');
+        arrow.style.cssText = 'position:absolute;top:100%;left:50%;transform:translateX(-50%);width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-top:6px solid #1e293b;';
+        tip.appendChild(arrow);
+        pin.appendChild(tip);
+
+        pin.addEventListener('mouseenter', function() { tip.style.display = 'block'; });
+        pin.addEventListener('mouseleave', function() { tip.style.display = 'none'; });
+
+        overlay.appendChild(pin);
+      });
+    });
+  }, [annotations]);
+
+  // Close popup on outside click
+  useEffect(function() {
+    function h(e) { if (popupRef.current && !popupRef.current.contains(e.target)) setPopup(null); }
+    document.addEventListener('mousedown', h);
+    return function() { document.removeEventListener('mousedown', h); };
   }, []);
 
+  // Render PDF pages
   useEffect(function() {
     if (!arrayBuf || !containerRef.current) return;
 
@@ -139,6 +189,7 @@ function PdfCanvasViewer({ arrayBuf, blobUrl, fileName, canAnnotate, annotations
 
     var container = containerRef.current;
     container.innerHTML = '';
+    overlayMapRef.current = {};
     setPdfLoading(true);
 
     loadScript(PDFJS_CDN)
@@ -149,70 +200,49 @@ function PdfCanvasViewer({ arrayBuf, blobUrl, fileName, canAnnotate, annotations
       .then(function(pdf) {
         setPageCount(pdf.numPages);
         var chain = Promise.resolve();
-
         for (var i = 1; i <= pdf.numPages; i++) {
-          (function(pageNum) {
+          (function(pn) {
             chain = chain.then(function() {
-              return pdf.getPage(pageNum).then(function(page) {
-                var scale    = 1.8;
-                var viewport = page.getViewport({ scale: scale });
+              return pdf.getPage(pn).then(function(page) {
+                var vp = page.getViewport({ scale: 1.8 });
 
-                // Page wrapper — position:relative so overlays can be absolute inside
                 var wrapper = document.createElement('div');
-                wrapper.style.cssText = 'position:relative;margin:0 auto 12px;max-width:900px;box-shadow:0 2px 12px rgba(0,0,0,0.25);background:#fff;cursor:' + (canAnnotate ? 'crosshair' : 'default') + ';';
-                wrapper.dataset.page = pageNum;
+                wrapper.style.cssText = 'position:relative;margin:0 auto 16px;max-width:900px;box-shadow:0 3px 16px rgba(0,0,0,0.4);background:#fff;';
+
+                var label = document.createElement('div');
+                label.style.cssText = 'position:absolute;top:-22px;left:0;font-size:10px;color:#d1d5db;font-weight:700;font-family:sans-serif;letter-spacing:0.08em;user-select:none;';
+                label.textContent = 'PAGE ' + pn;
+                wrapper.appendChild(label);
 
                 var canvas = document.createElement('canvas');
-                canvas.width  = viewport.width;
-                canvas.height = viewport.height;
+                canvas.width = vp.width; canvas.height = vp.height;
                 canvas.style.cssText = 'display:block;width:100%;height:auto;';
                 wrapper.appendChild(canvas);
 
-                // Click overlay for annotations
+                // Click + pin overlay
+                var pinOverlay = document.createElement('div');
+                pinOverlay.style.cssText = 'position:absolute;inset:0;z-index:5;' + (canAnnotate ? 'cursor:crosshair;' : 'pointer-events:none;');
+                overlayMapRef.current[pn] = pinOverlay;
+
                 if (canAnnotate) {
-                  var overlay = document.createElement('div');
-                  overlay.style.cssText = 'position:absolute;inset:0;z-index:1;';
-                  overlay.addEventListener('click', function(e) {
-                    var rect   = wrapper.getBoundingClientRect();
-                    var contR  = container.getBoundingClientRect();
-                    var xPct   = Math.round((e.clientX - rect.left)  / rect.width  * 100);
-                    var yPct   = Math.round((e.clientY - rect.top)   / rect.height * 100);
-                    var screenX = e.clientX - contR.left;
-                    var screenY = e.clientY - contR.top  + container.scrollTop;
-                    setPopup({ page: pageNum, xPct: xPct, yPct: yPct, screenX: screenX, screenY: screenY });
+                  pinOverlay.addEventListener('click', function(e) {
+                    if (e.target !== pinOverlay) return; // ignore pin clicks
+                    var wRect = wrapper.getBoundingClientRect();
+                    var cRect = container.getBoundingClientRect();
+                    var xPct  = Math.round((e.clientX - wRect.left) / wRect.width  * 100);
+                    var yPct  = Math.round((e.clientY - wRect.top)  / wRect.height * 100);
+                    setPopup({
+                      page: pn, xPct: xPct, yPct: yPct,
+                      screenX: e.clientX - cRect.left,
+                      screenY: (e.clientY - cRect.top) + container.scrollTop,
+                    });
                     setPopupText('');
                   });
-                  wrapper.appendChild(overlay);
                 }
 
+                wrapper.appendChild(pinOverlay);
                 container.appendChild(wrapper);
-
-                return page.render({ canvasContext: canvas.getContext('2d'), viewport: viewport }).promise
-                  .then(function() {
-                    // Draw existing annotation pins for this page
-                    var ctx    = canvas.getContext('2d');
-                    var pageAnns = (annotations || []).filter(function(a) {
-                      return a.reference && a.reference.indexOf('Page ' + pageNum) !== -1;
-                    });
-                    pageAnns.forEach(function(ann) {
-                      // Parse position from reference like "Page 3 (45%, 67%)"
-                      var match = ann.reference.match(/\((\d+)%,\s*(\d+)%\)/);
-                      if (match) {
-                        var px = parseInt(match[1]) / 100 * canvas.width;
-                        var py = parseInt(match[2]) / 100 * canvas.height;
-                        // Draw pin
-                        ctx.beginPath();
-                        ctx.arc(px, py, 12, 0, Math.PI * 2);
-                        ctx.fillStyle = ann.role === 'signatory' ? 'rgba(124,58,237,0.85)' : 'rgba(245,158,11,0.9)';
-                        ctx.fill();
-                        ctx.font = 'bold 14px Arial';
-                        ctx.fillStyle = '#fff';
-                        ctx.textAlign = 'center';
-                        ctx.textBaseline = 'middle';
-                        ctx.fillText('💬', px, py);
-                      }
-                    });
-                  });
+                return page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
               });
             });
           })(i);
@@ -221,85 +251,58 @@ function PdfCanvasViewer({ arrayBuf, blobUrl, fileName, canAnnotate, annotations
       })
       .then(function() { setPdfLoading(false); })
       .catch(function(e) {
-        console.error('PDF.js error:', e);
-        if (container) container.innerHTML = '<p style="color:#dc2626;padding:20px;text-align:center;">PDF render failed: ' + e.message + '</p>';
+        console.error('PDF.js:', e);
+        if (containerRef.current) containerRef.current.innerHTML = '<p style="color:#fca5a5;padding:24px;text-align:center;font-size:13px;">Render error: ' + e.message + '</p>';
         setPdfLoading(false);
       });
   }, [arrayBuf, canAnnotate]);
 
   function submitAnnotation() {
     if (!popupText.trim() || !popup) return;
-    onAnnotate({
-      reference: 'Page ' + popup.page + ' (' + popup.xPct + '%, ' + popup.yPct + '%)',
-      body:      popupText.trim(),
-    });
-    setPopup(null);
-    setPopupText('');
+    onAnnotate({ reference: 'Page ' + popup.page + ' (' + popup.xPct + '%, ' + popup.yPct + '%)', body: popupText.trim() });
+    setPopup(null); setPopupText('');
   }
 
   return (
     <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
-      {/* Toolbar */}
       <div style={{background:'#f8fafc',borderBottom:'1px solid #e2e8f0',padding:'6px 14px',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
-        <span style={{fontSize:11,color:'#94a3b8',fontWeight:600}}>
-          📄 {fileName} {pageCount > 0 ? '(' + pageCount + (pageCount === 1 ? ' page' : ' pages') + ')' : ''}
-        </span>
+        <span style={{fontSize:11,color:'#94a3b8',fontWeight:600}}>📄 {fileName}{pageCount > 0 ? ' · ' + pageCount + (pageCount===1?' page':' pages') : ''}</span>
         <div style={{display:'flex',alignItems:'center',gap:12}}>
-          {canAnnotate && <span style={{fontSize:11,color:'#f97316',fontWeight:700,background:'#fff7ed',padding:'2px 10px',borderRadius:20,border:'1px solid #fed7aa'}}>✦ Click anywhere to comment</span>}
+          {canAnnotate && <span style={{fontSize:11,color:'#f97316',fontWeight:700,background:'#fff7ed',padding:'2px 10px',borderRadius:20,border:'1px solid #fed7aa'}}>✦ Click on the page to add a comment</span>}
           {blobUrl && <a href={blobUrl} target="_blank" rel="noreferrer" style={{fontSize:11,color:'#1e3a5f',fontWeight:700,textDecoration:'none'}}>Open in new tab ↗</a>}
         </div>
       </div>
 
-      {/* PDF canvas area */}
       <div style={{flex:1,position:'relative',overflow:'hidden'}}>
         {pdfLoading && (
-          <div style={{position:'absolute',inset:0,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',background:'rgba(82,86,89,0.7)',zIndex:10}}>
-            <div style={{width:32,height:32,border:'3px solid rgba(255,255,255,0.3)',borderTopColor:'#fff',borderRadius:'50%',animation:'spin 0.7s linear infinite',marginBottom:12}}/>
+          <div style={{position:'absolute',inset:0,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',background:'rgba(82,86,89,0.8)',zIndex:10}}>
+            <div style={{width:34,height:34,border:'3px solid rgba(255,255,255,0.2)',borderTopColor:'#fff',borderRadius:'50%',animation:'spin 0.7s linear infinite',marginBottom:14}}/>
             <p style={{fontSize:13,fontWeight:600,color:'#fff'}}>Rendering PDF…</p>
           </div>
         )}
+        <div ref={containerRef} style={{height:'100%',overflowY:'auto',background:'#525659',padding:'30px 24px 24px'}}/>
 
-        <div ref={containerRef} style={{height:'100%',overflowY:'auto',background:'#525659',padding:'16px 24px',position:'relative'}}/>
-
-        {/* Annotation popup */}
         {popup && (
-          <div ref={popupRef} style={{
-            position:'absolute',
-            left: Math.min(popup.screenX + 12, 580),
-            top:  Math.max(popup.screenY - 20, 8),
-            background:'#fff',
-            border:'1px solid #e2e8f0',
-            borderRadius:14,
-            padding:14,
-            boxShadow:'0 8px 32px rgba(0,0,0,0.18)',
-            zIndex:20,
-            width:280,
-          }}>
-            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10}}>
-              <span style={{fontSize:11,fontWeight:800,color:'#1e3a5f',textTransform:'uppercase',letterSpacing:'0.07em'}}>
-                Add Comment — Page {popup.page}
-              </span>
-              <button onClick={function(){setPopup(null);}} style={{background:'none',border:'none',color:'#94a3b8',cursor:'pointer',fontSize:16,lineHeight:1,padding:2}}>✕</button>
+          <div ref={popupRef} style={{position:'absolute',left:Math.min(popup.screenX+16,580),top:Math.max(popup.screenY-10,8),
+            background:'#fff',border:'1.5px solid #e2e8f0',borderRadius:16,padding:16,
+            boxShadow:'0 12px 40px rgba(0,0,0,0.22)',zIndex:30,width:288}}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:12}}>
+              <div style={{display:'flex',alignItems:'center',gap:8}}>
+                <div style={{width:10,height:10,borderRadius:'50%',background:'#f59e0b'}}/>
+                <span style={{fontSize:12,fontWeight:800,color:'#1e3a5f'}}>Comment — Page {popup.page}</span>
+              </div>
+              <button onClick={function(){setPopup(null);}} style={{background:'none',border:'none',color:'#94a3b8',cursor:'pointer',fontSize:18,lineHeight:1}}>✕</button>
             </div>
-            <div style={{fontSize:10,color:'#94a3b8',marginBottom:8,fontWeight:600}}>
-              📍 Position: {popup.xPct}%, {popup.yPct}% on page {popup.page}
-            </div>
-            <textarea
-              autoFocus
-              placeholder="Write your comment…"
-              value={popupText}
+            <textarea autoFocus placeholder="Write your comment here…" value={popupText}
               onChange={function(e){setPopupText(e.target.value);}}
               onKeyDown={function(e){ if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)) submitAnnotation(); }}
-              rows={3}
-              style={{width:'100%',border:'1.5px solid #e2e8f0',borderRadius:8,padding:'8px 10px',fontSize:12,resize:'none',fontFamily:'inherit',outline:'none',marginBottom:10}}
-            />
+              rows={3} style={{width:'100%',border:'1.5px solid #e2e8f0',borderRadius:10,padding:'9px 12px',fontSize:12,resize:'none',fontFamily:'inherit',outline:'none',marginBottom:12}}/>
             <div style={{display:'flex',gap:8}}>
               <button onClick={submitAnnotation} disabled={!popupText.trim()}
-                style={{flex:1,padding:'8px',background:popupText.trim()?'#1e3a5f':'#94a3b8',color:'#fff',border:'none',borderRadius:8,fontSize:12,fontWeight:700,cursor:popupText.trim()?'pointer':'not-allowed',fontFamily:'inherit'}}>
+                style={{flex:1,padding:'9px',background:popupText.trim()?'#1e3a5f':'#cbd5e1',color:'#fff',border:'none',borderRadius:10,fontSize:12,fontWeight:700,cursor:popupText.trim()?'pointer':'not-allowed',fontFamily:'inherit'}}>
                 Add Comment
               </button>
-              <button onClick={function(){setPopup(null);}}
-                style={{padding:'8px 12px',background:'#f1f5f9',border:'none',borderRadius:8,fontSize:12,cursor:'pointer',fontFamily:'inherit',color:'#64748b'}}>
+              <button onClick={function(){setPopup(null);}} style={{padding:'9px 14px',background:'#f1f5f9',border:'none',borderRadius:10,fontSize:12,cursor:'pointer',fontFamily:'inherit',color:'#64748b',fontWeight:600}}>
                 Cancel
               </button>
             </div>
@@ -311,9 +314,6 @@ function PdfCanvasViewer({ arrayBuf, blobUrl, fileName, canAnnotate, annotations
   );
 }
 
-// ══════════════════════════════════════════════════════════════
-// WORD VIEWER — mammoth HTML render + inline comment popup
-// ══════════════════════════════════════════════════════════════
 function WordViewer({ docHtml, blobUrl, fileName, canAnnotate, annotations, onAnnotate, onTextSelect }) {
   var [popup, setPopup]       = useState(null); // {x, y, selectedText}
   var [popupText, setPopupText] = useState('');
@@ -661,7 +661,7 @@ function AnnotationPanel({ material, currentVersion, roleId, user, onAdd, onReso
                   <button onClick={()=>onResolve(a.id)} style={{background:'none',border:'none',color:'#16a34a',fontWeight:800,fontSize:13,cursor:'pointer'}}>✓</button>
                 )}
               </div>
-              {a.reference&&<div style={{display:'inline-flex',alignItems:'center',gap:4,background:'rgba(255,255,255,0.8)',border:'1px solid #e2e8f0',borderRadius:6,padding:'2px 8px',fontSize:11,color:'#475569',fontWeight:600,marginBottom:6}}>📍 {a.reference}</div>}
+              {a.reference&&<div style={{display:'inline-flex',alignItems:'center',gap:4,background:'rgba(255,255,255,0.8)',border:'1px solid #e2e8f0',borderRadius:6,padding:'2px 8px',fontSize:11,color:'#475569',fontWeight:600,marginBottom:6}}>📍 {a.reference.replace(/\s*\(\d+%,\s*\d+%\)/,'')}</div>}
               <p style={{color:'#475569',lineHeight:1.6,marginTop:4}}>{a.body}</p>
               <p style={{color:'#94a3b8',marginTop:6,fontSize:11}}>{fmt(a.created_at)}</p>
               {a.resolved&&<p style={{color:'#16a34a',fontWeight:700,marginTop:4,fontSize:11}}>✓ Addressed</p>}
