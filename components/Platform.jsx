@@ -2,7 +2,7 @@
 // components/Platform.jsx
 // Adapted from the prototype — state now persisted via API routes + Supabase.
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 
 // ══════════════════════════════════════════════════════════════
 // CONSTANTS (same as prototype)
@@ -102,20 +102,123 @@ function Spinner() {
 }
 
 // ══════════════════════════════════════════════════════════════
-// DOCUMENT VIEWER — inline for all file types
+// DOCUMENT VIEWER — inline rendering + track changes
 // ══════════════════════════════════════════════════════════════
-function DocumentViewer({ fileUrl, fileName, type, onTextSelect }) {
+function DocumentViewer({ fileUrl, fileName, type, canAnnotate, annotations, onTextSelect, onSuggestion }) {
+  const [docHtml,   setDocHtml]   = useState(null);
+  const [sheets,    setSheets]    = useState([]);
+  const [activeTab, setActiveTab] = useState(0);
+  const [loading,   setLoading]   = useState(false);
+  const [viewErr,   setViewErr]   = useState(null);
+  const [selText,   setSelText]   = useState('');
+  const [popup,     setPopup]     = useState(null); // {x,y}
+  const [repText,   setRepText]   = useState('');
+  const [showRep,   setShowRep]   = useState(false);
 
-  const handleMouseUp = () => {
-    const sel = window.getSelection()?.toString()?.trim();
-    if (sel && onTextSelect) onTextSelect('"' + sel.substring(0, 80) + '"');
+  const loadScript = src => new Promise((res, rej) => {
+    if (document.querySelector(`script[src="${src}"]`)) { res(); return; }
+    const s = document.createElement('script');
+    s.src = src; s.onload = res; s.onerror = rej;
+    document.head.appendChild(s);
+  });
+
+  useEffect(() => {
+    if (!fileUrl) return;
+    setDocHtml(null); setSheets([]); setViewErr(null); setActiveTab(0);
+    if (type?.includes('Word'))  loadDocx();
+    if (type?.includes('Excel')) loadXlsx();
+  }, [fileUrl, type]);
+
+  const loadDocx = async () => {
+    setLoading(true);
+    try {
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js');
+      const r = await fetch(fileUrl);
+      if (!r.ok) throw new Error(`Server returned ${r.status}`);
+      const buf = await r.arrayBuffer();
+      const { value } = await window.mammoth.convertToHtml({ arrayBuffer: buf });
+      setDocHtml(value || '<p style="color:#94a3b8">Empty document.</p>');
+    } catch(e) { setViewErr(e.message); }
+    setLoading(false);
   };
 
+  const loadXlsx = async () => {
+    setLoading(true);
+    try {
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+      const r = await fetch(fileUrl);
+      if (!r.ok) throw new Error(`Server returned ${r.status}`);
+      const buf = await r.arrayBuffer();
+      const wb  = window.XLSX.read(buf, { type:'array' });
+      setSheets(wb.SheetNames.map(n => ({ name:n, html:window.XLSX.utils.sheet_to_html(wb.Sheets[n]) })));
+    } catch(e) { setViewErr(e.message); }
+    setLoading(false);
+  };
+
+  // Build highlighted HTML — apply track-change annotations as red/green marks
+  const processedHtml = useMemo(() => {
+    if (!docHtml) return '';
+    let html = docHtml;
+    const suggestions = (annotations || []).filter(a => a.is_suggestion && a.reference);
+    suggestions.forEach(s => {
+      const orig = s.reference.replace(/^"|"$/g,''); // strip surrounding quotes
+      if (!orig) return;
+      const escaped = orig.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+      try {
+        html = html.replace(new RegExp(escaped,'g'),
+          `<span class="tc-del">${orig}</span>${s.body ? `<span class="tc-ins">${s.body}</span>` : ''}`
+        );
+      } catch {}
+    });
+    return html;
+  }, [docHtml, annotations]);
+
+  const handleMouseUp = e => {
+    const sel = window.getSelection()?.toString()?.trim();
+    if (!sel || sel.length < 2) { setPopup(null); return; }
+    setSelText(sel);
+    setRepText('');
+    setShowRep(false);
+    if (onTextSelect) onTextSelect('"' + sel.substring(0,80) + '"');
+    // Position popup near selection
+    const rect = window.getSelection().getRangeAt(0).getBoundingClientRect();
+    const container = e.currentTarget.getBoundingClientRect();
+    setPopup({ x: rect.left - container.left, y: rect.bottom - container.top + 8 });
+  };
+
+  const submitSuggestion = () => {
+    if (!selText) return;
+    onSuggestion({
+      reference:     '"' + selText.substring(0,80) + '"',
+      body:          repText.trim() || '(delete)',
+      is_suggestion: true,
+    });
+    setPopup(null); setSelText(''); setRepText('');
+  };
+
+  // ── Shared states ──────────────────────────────────────────────
   if (!fileUrl) return (
     <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',background:'#f8fafc'}}>
-      <div style={{textAlign:'center',color:'#94a3b8'}}>
-        <div style={{fontSize:52,marginBottom:10}}>{fileIcon(type)}</div>
-        <p style={{fontSize:13,fontWeight:600}}>No file uploaded</p>
+      <div style={{textAlign:'center',color:'#94a3b8'}}><div style={{fontSize:52,marginBottom:10}}>{fileIcon(type)}</div><p style={{fontSize:13,fontWeight:600}}>No file</p></div>
+    </div>
+  );
+  if (loading) return (
+    <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:12,background:'#f8fafc'}}>
+      <div style={{width:32,height:32,border:'3px solid #e2e8f0',borderTopColor:'#1e3a5f',borderRadius:'50%',animation:'spin 0.7s linear infinite'}}/>
+      <p style={{fontSize:13,color:'#64748b',fontWeight:600}}>Loading document…</p>
+    </div>
+  );
+  if (viewErr) return (
+    <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',background:'#fef2f2',padding:32}}>
+      <div style={{textAlign:'center',maxWidth:320}}>
+        <div style={{fontSize:40,marginBottom:12}}>⚠️</div>
+        <p style={{fontWeight:700,color:'#991b1b',marginBottom:8}}>Could not load document</p>
+        <p style={{fontSize:12,color:'#dc2626',marginBottom:4}}>{viewErr}</p>
+        <p style={{fontSize:11,color:'#94a3b8',marginBottom:16}}>If this is a new file, check the Supabase bucket is set to Public.</p>
+        <a href={fileUrl} target="_blank" rel="noreferrer"
+          style={{display:'inline-flex',alignItems:'center',gap:6,padding:'8px 16px',background:'#1e3a5f',color:'#fff',borderRadius:10,fontSize:13,fontWeight:700,textDecoration:'none'}}>
+          ⬇ Download Instead
+        </a>
       </div>
     </div>
   );
@@ -127,50 +230,148 @@ function DocumentViewer({ fileUrl, fileName, type, onTextSelect }) {
         <span style={{fontSize:11,color:'#94a3b8',fontWeight:600}}>📄 {fileName}</span>
         <a href={fileUrl} target="_blank" rel="noreferrer" style={{fontSize:11,color:'#1e3a5f',fontWeight:700,textDecoration:'none'}}>Open in new tab ↗</a>
       </div>
-      <div style={{flex:1,overflow:'hidden'}} onMouseUp={handleMouseUp}>
-        <iframe src={fileUrl} style={{width:'100%',height:'100%',border:'none'}} title="PDF Viewer"/>
-      </div>
+      <iframe src={fileUrl} style={{flex:1,width:'100%',border:'none'}} title="PDF Viewer"/>
     </div>
   );
 
   // ── AUDIO ──────────────────────────────────────────────────────
   if (type === 'Audio File') return (
     <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',background:'linear-gradient(135deg,#f0f9ff,#e0e7ff)',gap:20,padding:40}}>
-      <div style={{width:80,height:80,borderRadius:20,background:'#e0e7ff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:36,boxShadow:'0 4px 20px rgba(99,102,241,0.2)'}}>🎵</div>
-      <div style={{textAlign:'center'}}>
-        <p style={{fontWeight:700,color:'#3730a3',marginBottom:4}}>{fileName}</p>
-        <p style={{fontSize:12,color:'#6366f1'}}>Add timestamped comments in the panel on the right →</p>
-      </div>
+      <div style={{width:80,height:80,borderRadius:20,background:'#e0e7ff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:36}}>🎵</div>
+      <p style={{fontWeight:700,color:'#3730a3'}}>{fileName}</p>
       <audio controls src={fileUrl} style={{width:'100%',maxWidth:420,borderRadius:8}}/>
     </div>
   );
 
   // ── VIDEO ──────────────────────────────────────────────────────
   if (type === 'Video File') return (
-    <div style={{flex:1,background:'#0f172a',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:16,gap:12}}>
-      <video controls src={fileUrl} style={{maxHeight:'85%',maxWidth:'100%',borderRadius:8,boxShadow:'0 20px 60px rgba(0,0,0,0.5)'}}/>
-      <p style={{fontSize:11,color:'#475569'}}>Use the timestamp field in the comment panel to reference a specific moment</p>
+    <div style={{flex:1,background:'#0f172a',display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
+      <video controls src={fileUrl} style={{maxHeight:'100%',maxWidth:'100%',borderRadius:8}}/>
     </div>
   );
 
-  // ── WORD / EXCEL / POWERPOINT — Google Docs Viewer ────────────
-  if (type?.includes('Word') || type?.includes('Excel') || type?.includes('PowerPoint')) {
+  // ── WORD / DOCX — mammoth inline + track changes ───────────────
+  if (type?.includes('Word')) return (
+    <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+      {/* Toolbar */}
+      <div style={{background:'#f8fafc',borderBottom:'1px solid #e2e8f0',padding:'6px 14px',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
+        <span style={{fontSize:11,color:'#94a3b8',fontWeight:600}}>📝 {fileName}</span>
+        <div style={{display:'flex',alignItems:'center',gap:12}}>
+          {canAnnotate && <span style={{fontSize:11,color:'#f97316',fontWeight:700,background:'#fff7ed',padding:'2px 8px',borderRadius:20,border:'1px solid #fed7aa'}}>✏️ Select text to track changes</span>}
+          <a href={fileUrl} download={fileName} style={{fontSize:11,color:'#1e3a5f',fontWeight:700,textDecoration:'none'}}>⬇ Download</a>
+        </div>
+      </div>
+      {/* Legend */}
+      {(annotations||[]).some(a=>a.is_suggestion) && (
+        <div style={{background:'#fffbeb',borderBottom:'1px solid #fde68a',padding:'5px 14px',display:'flex',alignItems:'center',gap:16,fontSize:11,flexShrink:0}}>
+          <span style={{fontWeight:700,color:'#92400e'}}>Track Changes:</span>
+          <span><span style={{background:'#fecaca',color:'#991b1b',textDecoration:'line-through',padding:'0 4px',borderRadius:2,marginRight:4}}>deleted text</span>original marked for change</span>
+          <span><span style={{background:'#bbf7d0',color:'#065f46',padding:'0 4px',borderRadius:2,marginRight:4}}>replacement</span>suggested text</span>
+        </div>
+      )}
+      {/* Document body */}
+      <div style={{flex:1,overflowY:'auto',padding:'32px 40px',background:'#fff',position:'relative'}} onMouseUp={handleMouseUp}>
+        <style>{`
+          .docx-body{max-width:720px;margin:0 auto;font-family:Georgia,'Times New Roman',serif;font-size:14px;line-height:1.9;color:#1e293b}
+          .docx-body h1{font-size:22px;font-weight:700;margin:24px 0 12px;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:8px}
+          .docx-body h2{font-size:18px;font-weight:700;margin:20px 0 8px;color:#1e293b}
+          .docx-body h3{font-size:15px;font-weight:700;margin:16px 0 6px;color:#334155}
+          .docx-body p{margin:0 0 12px}
+          .docx-body table{border-collapse:collapse;width:100%;margin:16px 0}
+          .docx-body td,.docx-body th{border:1px solid #e2e8f0;padding:8px 12px;font-size:13px}
+          .docx-body th{background:#f8fafc;font-weight:700}
+          .docx-body ul,.docx-body ol{margin:8px 0 12px 24px}
+          .docx-body li{margin-bottom:4px}
+          .tc-del{background:#fecaca;color:#991b1b;text-decoration:line-through;padding:1px 3px;border-radius:3px;border:1px solid #fca5a5}
+          .tc-ins{background:#bbf7d0;color:#065f46;padding:1px 3px;border-radius:3px;border:1px solid #86efac;margin-left:3px}
+          ::selection{background:#c7d2fe;color:#1e293b}
+        `}</style>
+        {processedHtml
+          ? <div className="docx-body" dangerouslySetInnerHTML={{ __html: processedHtml }}/>
+          : <div style={{textAlign:'center',paddingTop:80,color:'#94a3b8'}}>
+              <div style={{width:28,height:28,border:'3px solid #e2e8f0',borderTopColor:'#6366f1',borderRadius:'50%',animation:'spin 0.7s linear infinite',margin:'0 auto 12px'}}/>
+              <p>Rendering…</p>
+            </div>
+        }
+        {/* Track changes popup */}
+        {popup && canAnnotate && (
+          <div style={{position:'absolute',left:Math.min(popup.x, 420),top:popup.y,background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,padding:14,boxShadow:'0 8px 32px rgba(0,0,0,0.14)',zIndex:50,minWidth:280,maxWidth:360}}>
+            <p style={{fontSize:11,fontWeight:700,color:'#64748b',marginBottom:10}}>
+              Selected: <span style={{color:'#1e293b'}}>"{selText.length > 50 ? selText.substring(0,50)+'…' : selText}"</span>
+            </p>
+            {!showRep ? (
+              <div style={{display:'flex',gap:8}}>
+                <button onClick={()=>{setPopup(null);}} style={{flex:1,padding:'7px',background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:8,fontSize:12,cursor:'pointer',fontFamily:'inherit',fontWeight:700,color:'#1e40af'}}>
+                  💬 Comment only
+                </button>
+                <button onClick={()=>setShowRep(true)} style={{flex:1,padding:'7px',background:'#fff7ed',border:'1px solid #fed7aa',borderRadius:8,fontSize:12,cursor:'pointer',fontFamily:'inherit',fontWeight:700,color:'#92400e'}}>
+                  ✏️ Suggest Change
+                </button>
+              </div>
+            ) : (
+              <>
+                <p style={{fontSize:11,color:'#64748b',marginBottom:6}}>Replace with (leave blank to suggest deletion):</p>
+                <input value={repText} onChange={e=>setRepText(e.target.value)} placeholder="Replacement text…" autoFocus
+                  style={{width:'100%',border:'1px solid #e2e8f0',borderRadius:8,padding:'7px 10px',fontSize:12,fontFamily:'inherit',outline:'none',marginBottom:10}}/>
+                <div style={{display:'flex',gap:8}}>
+                  <button onClick={submitSuggestion}
+                    style={{flex:1,padding:'7px',background:'#1e3a5f',border:'none',borderRadius:8,fontSize:12,cursor:'pointer',fontFamily:'inherit',fontWeight:700,color:'#fff'}}>
+                    ✓ Submit Change
+                  </button>
+                  <button onClick={()=>{setPopup(null);setShowRep(false);}}
+                    style={{padding:'7px 12px',background:'#f1f5f9',border:'none',borderRadius:8,fontSize:12,cursor:'pointer',fontFamily:'inherit',color:'#64748b'}}>
+                    Cancel
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  // ── EXCEL / XLSX ───────────────────────────────────────────────
+  if (type?.includes('Excel')) return (
+    <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+      {sheets.length > 1 && (
+        <div style={{display:'flex',gap:4,padding:'8px 12px',background:'#f8fafc',borderBottom:'1px solid #e2e8f0',flexShrink:0,overflowX:'auto'}}>
+          {sheets.map((s,i) => (
+            <button key={i} onClick={()=>setActiveTab(i)}
+              style={{padding:'4px 12px',borderRadius:6,border:'1px solid #e2e8f0',fontSize:11,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap',fontFamily:'inherit',
+                background:activeTab===i?'#1e3a5f':'#fff',color:activeTab===i?'#fff':'#64748b',transition:'all 0.15s'}}>
+              {s.name}
+            </button>
+          ))}
+          <span style={{marginLeft:'auto',fontSize:11,color:'#94a3b8',alignSelf:'center',flexShrink:0}}>📊 {fileName}</span>
+        </div>
+      )}
+      <div style={{flex:1,overflow:'auto',padding:16,background:'#fff'}} onMouseUp={handleMouseUp}>
+        <style>{`
+          .xlsx-wrap table{border-collapse:collapse;font-size:12px;font-family:'DM Mono',monospace;min-width:100%}
+          .xlsx-wrap td,.xlsx-wrap th{border:1px solid #e2e8f0;padding:5px 10px;white-space:nowrap;color:#334155}
+          .xlsx-wrap tr:first-child td{background:#f8fafc;font-weight:700;color:#0f172a;position:sticky;top:0;z-index:1}
+          .xlsx-wrap tr:hover td{background:#f0f4ff}
+          ::selection{background:#c7d2fe}
+        `}</style>
+        {sheets.length > 0
+          ? <div className="xlsx-wrap" dangerouslySetInnerHTML={{ __html: sheets[activeTab]?.html || '' }}/>
+          : null
+        }
+      </div>
+    </div>
+  );
+
+  // ── POWERPOINT — Google Docs Viewer ───────────────────────────
+  if (type?.includes('PowerPoint')) {
     const gdocsUrl = `https://docs.google.com/viewer?url=${encodeURIComponent(fileUrl)}&embedded=true`;
-    const icon = type?.includes('Word') ? '📝' : type?.includes('Excel') ? '📊' : '📋';
     return (
       <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
         <div style={{background:'#f8fafc',borderBottom:'1px solid #e2e8f0',padding:'6px 14px',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
-          <span style={{fontSize:11,color:'#94a3b8',fontWeight:600}}>{icon} {fileName}</span>
-          <div style={{display:'flex',alignItems:'center',gap:14}}>
-            <span style={{fontSize:11,color:'#6366f1',fontWeight:600}}>💡 Add comments in the panel →</span>
-            <a href={fileUrl} download={fileName} style={{fontSize:11,color:'#1e3a5f',fontWeight:700,textDecoration:'none'}}>⬇ Download</a>
-          </div>
+          <span style={{fontSize:11,color:'#94a3b8',fontWeight:600}}>📋 {fileName}</span>
+          <a href={fileUrl} download={fileName} style={{fontSize:11,color:'#1e3a5f',fontWeight:700,textDecoration:'none'}}>⬇ Download</a>
         </div>
-        <iframe
-          src={gdocsUrl}
-          style={{flex:1,width:'100%',border:'none'}}
-          title="Document Viewer"
-        />
+        <iframe src={gdocsUrl} style={{flex:1,width:'100%',border:'none'}} title="PowerPoint Viewer"/>
       </div>
     );
   }
@@ -181,7 +382,7 @@ function DocumentViewer({ fileUrl, fileName, type, onTextSelect }) {
       <div style={{textAlign:'center',maxWidth:280,background:'#fff',borderRadius:20,padding:36,boxShadow:'0 4px 20px rgba(0,0,0,0.06)',border:'1px solid #e2e8f0'}}>
         <div style={{fontSize:56,marginBottom:14}}>{fileIcon(type)}</div>
         <p style={{fontWeight:700,color:'#1e293b',marginBottom:6}}>{fileName}</p>
-        <p style={{fontSize:13,color:'#64748b',marginBottom:20}}>Preview not available for this file type. Download to review, then add comments in the panel on the right.</p>
+        <p style={{fontSize:13,color:'#64748b',marginBottom:20}}>Download to review, then add comments in the panel on the right.</p>
         <a href={fileUrl} download={fileName} target="_blank" rel="noreferrer"
           style={{display:'inline-flex',alignItems:'center',gap:6,padding:'9px 18px',background:'#1e3a5f',color:'#fff',borderRadius:10,fontSize:13,fontWeight:700,textDecoration:'none'}}>
           ⬇ Download to Review
@@ -250,6 +451,7 @@ function AnnotationPanel({ material, currentVersion, roleId, user, onAdd, onReso
                 <div style={{display:'flex',alignItems:'center',gap:6}}>
                   <span style={{width:8,height:8,borderRadius:'50%',background:a.resolved?'#cbd5e1':c.dot,flexShrink:0}}/>
                   <span style={{fontWeight:700,color:'#334155'}}>{a.author}</span>
+              {a.is_suggestion&&<span style={{fontSize:10,background:'#fff7ed',color:'#92400e',border:'1px solid #fed7aa',padding:'1px 6px',borderRadius:10,fontWeight:700}}>✏️ Change</span>}
                   {a.is_cert&&<span style={{fontSize:10,color:'#7c3aed'}}>🔏 Cert</span>}
                 </div>
                 {!a.resolved&&roleId==='owner'&&(
@@ -631,6 +833,10 @@ function Dashboard({ materials, roleId, curUser, onSelect, onSubmit, loading }) 
 function MaterialDetail({ mat, roleId, user, onBack, onVerdict, onAddAnn, onResolveAnn, onResubmit, onInitiateCert, onShowCert, busy }) {
   const curV = mat.versions?.find(v=>v.version_number===mat.current_version);
   const [prefillRef, setPrefillRef] = useState('');
+
+  const canAnnotate = (roleId==='reviewer'&&mat.status===ST.REVIEW)||(roleId==='signatory'&&mat.status===ST.CERT);
+
+  const handleSuggestion = (s) => onAddAnn({ ...s, role: roleId, author: user, version_num: mat.current_version });
   return (
     <div style={{display:'flex',flexDirection:'column',height:'calc(100vh - 108px)'}}>
       {/* Sub-header */}
@@ -699,7 +905,13 @@ function MaterialDetail({ mat, roleId, user, onBack, onVerdict, onAddAnn, onReso
         {/* Viewer + annotations */}
         <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
           <div style={{flex:1,display:'flex',overflow:'hidden'}}>
-            <DocumentViewer fileUrl={curV?.file_url} fileName={curV?.file_name} type={mat.type} onTextSelect={setPrefillRef}/>
+            <DocumentViewer
+              fileUrl={curV?.file_url} fileName={curV?.file_name} type={mat.type}
+              canAnnotate={canAnnotate}
+              annotations={curV?.annotations}
+              onTextSelect={setPrefillRef}
+              onSuggestion={handleSuggestion}
+            />
             <AnnotationPanel material={mat} currentVersion={curV} roleId={roleId} user={user} onAdd={onAddAnn} onResolve={onResolveAnn} prefillRef={prefillRef} onPrefillUsed={()=>setPrefillRef('')}/>
           </div>
 
